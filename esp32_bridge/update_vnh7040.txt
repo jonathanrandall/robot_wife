@@ -1,0 +1,11 @@
+
+The code project here is for the VNH5019.
+
+Can you please update this code from the vnh5019 to the VNH7040aytr. The VNH7040aytr doesn't have the enable and diag pins and it has a shared SEL0 and SEL1 for the four motor drivers. The SEL0 and SEL1 enable the current sense. So for example if INA = 0, INB =1, SEL0=0 and SEL1 = 0, this is for current monitoring HSB. When INA = 1, INV = 0, SEL0=1, SEL1 = 0, this is for Current monitoring HSA. The pinmap for the configuration of the VNH7040 is in docs/pinmap.md. The MCP23017 has a red and green led at GPA1 and GP2 respectively. The motor encoder setup is the same, so this part shouldn't change. The PWM pins are the same and the current sense inputs are also the same on the esp32. But we just have to set SEL0 and SEL1 on the MCP23017 to get the current sense to work properly. Also fault detection is on the current sense pin, which goes high to VsenseH when there is a fault.
+
+The pinmap for the schematic is in PINMAP_v3.md. The datahsset for the VNH7040ay is in vnh7040_datasheet.pdf.
+
+Please make minimal changes. 
+
+
+

@@ -1,0 +1,230 @@
+import FreeCAD as App
+import Part
+import Sketcher
+
+# ============================================================
+# EDITABLE PARAMETERS
+# ============================================================
+
+CIRCLE_DIAMETER = 125.0
+PLATE_THICKNESS = 2.0
+CENTRE_HOLE_DIAMETER = 12.5
+
+# Distance from the leftmost edge of the original circle
+# to the straight cut.
+#
+# 45 mm is three quarters of a 60 mm diameter.
+CUT_POSITION_FROM_LEFT = 110.0
+
+DOCUMENT_NAME = "FlatCircleWithCutEdge"
+
+# ============================================================
+# DERIVED VALUES
+# ============================================================
+
+circle_radius = CIRCLE_DIAMETER / 2.0
+hole_radius = CENTRE_HOLE_DIAMETER / 2.0
+
+# Circle extends from -radius to +radius.
+cut_x = -circle_radius + CUT_POSITION_FROM_LEFT
+
+# Rectangle used to remove the unwanted circular cap.
+cut_rectangle_extension = CIRCLE_DIAMETER
+
+# ============================================================
+# CREATE DOCUMENT
+# ============================================================
+
+try:
+    App.closeDocument(DOCUMENT_NAME)
+except Exception:
+    pass
+
+doc = App.newDocument(DOCUMENT_NAME)
+
+# ============================================================
+# CREATE PART DESIGN BODY
+# ============================================================
+
+body = doc.addObject("PartDesign::Body", "Body")
+body.Label = "Cut Circular Plate"
+
+# Add editable parameters to the body.
+body.addProperty(
+    "App::PropertyLength",
+    "CircleDiameter",
+    "Parameters",
+    "Original diameter of the circular plate",
+)
+body.CircleDiameter = CIRCLE_DIAMETER
+
+body.addProperty(
+    "App::PropertyLength",
+    "PlateThickness",
+    "Parameters",
+    "Thickness of the plate",
+)
+body.PlateThickness = PLATE_THICKNESS
+
+body.addProperty(
+    "App::PropertyLength",
+    "CentreHoleDiameter",
+    "Parameters",
+    "Diameter of the centre hole",
+)
+body.CentreHoleDiameter = CENTRE_HOLE_DIAMETER
+
+body.addProperty(
+    "App::PropertyLength",
+    "CutPositionFromLeft",
+    "Parameters",
+    "Distance from the original left edge to the straight cut",
+)
+body.CutPositionFromLeft = CUT_POSITION_FROM_LEFT
+
+# ============================================================
+# BASE CIRCLE SKETCH
+# ============================================================
+
+base_sketch = doc.addObject("PartDesign::Feature", "BaseCircleSketch")
+base_sketch.Label = "Base Circle Sketch"
+body.addObject(base_sketch)
+
+# Store the circular sketch geometry as a visible editable feature.
+base_sketch.addProperty(
+    "App::PropertyLength",
+    "Diameter",
+    "Sketch Parameters",
+)
+base_sketch.Diameter = CIRCLE_DIAMETER
+
+base_sketch.Shape = Part.Wire(
+    [
+        Part.makeCircle(
+            circle_radius,
+            App.Vector(0, 0, 0),
+            App.Vector(0, 0, 1),
+            0,
+            360,
+        )
+    ]
+)
+
+# ============================================================
+# PADDED CIRCULAR PLATE
+# ============================================================
+
+base_pad = doc.addObject("PartDesign::Feature", "BasePad")
+base_pad.Label = "Circular Plate"
+body.addObject(base_pad)
+
+base_pad.addProperty(
+    "App::PropertyLength",
+    "Diameter",
+    "Parameters",
+)
+base_pad.Diameter = CIRCLE_DIAMETER
+
+base_pad.addProperty(
+    "App::PropertyLength",
+    "Thickness",
+    "Parameters",
+)
+base_pad.Thickness = PLATE_THICKNESS
+
+base_pad.Shape = Part.makeCylinder(
+    circle_radius,
+    PLATE_THICKNESS,
+)
+
+base_sketch.Visibility = False
+
+# ============================================================
+# STRAIGHT-EDGE CUT FEATURE
+# ============================================================
+
+cut_feature = doc.addObject("PartDesign::Feature", "StraightEdgeCut")
+cut_feature.Label = "Straight Edge Cut"
+body.addObject(cut_feature)
+
+cut_feature.addProperty(
+    "App::PropertyLength",
+    "CutPositionFromLeft",
+    "Parameters",
+)
+cut_feature.CutPositionFromLeft = CUT_POSITION_FROM_LEFT
+
+cut_feature.addProperty(
+    "App::PropertyLength",
+    "CutXCoordinate",
+    "Parameters",
+)
+cut_feature.CutXCoordinate = cut_x
+
+# Create a large rectangular box starting at the cut line and
+# extending beyond the right side of the circle.
+cut_box = Part.makeBox(
+    cut_rectangle_extension,
+    CIRCLE_DIAMETER * 2.0,
+    PLATE_THICKNESS + 2.0,
+    App.Vector(
+        cut_x,
+        -CIRCLE_DIAMETER,
+        -1.0,
+    ),
+)
+
+shape_after_edge_cut = base_pad.Shape.cut(cut_box)
+cut_feature.Shape = shape_after_edge_cut
+
+base_pad.Visibility = False
+
+# ============================================================
+# CENTRE HOLE FEATURE
+# ============================================================
+
+hole_feature = doc.addObject("PartDesign::Feature", "CentreHole")
+hole_feature.Label = "12 mm Centre Hole"
+body.addObject(hole_feature)
+
+hole_feature.addProperty(
+    "App::PropertyLength",
+    "HoleDiameter",
+    "Parameters",
+)
+hole_feature.HoleDiameter = CENTRE_HOLE_DIAMETER
+
+hole_cylinder = Part.makeCylinder(
+    hole_radius,
+    PLATE_THICKNESS + 2.0,
+    App.Vector(0, 0, -1.0),
+)
+
+final_shape = shape_after_edge_cut.cut(hole_cylinder)
+hole_feature.Shape = final_shape
+
+cut_feature.Visibility = False
+
+# ============================================================
+# DISPLAY SETTINGS
+# ============================================================
+
+hole_feature.Label = (
+    f"Finished Plate — Ø{CIRCLE_DIAMETER:g} mm, "
+    f"Ø{CENTRE_HOLE_DIAMETER:g} mm Hole"
+)
+
+hole_feature.ViewObject.ShapeColor = (0.82, 0.82, 0.86)
+hole_feature.ViewObject.LineColor = (0.15, 0.15, 0.15)
+
+doc.recompute()
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.activeDocument().activeView().fitAll()
+
+print("Created circular plate successfully.")
+print(f"Circle diameter: {CIRCLE_DIAMETER} mm")
+print(f"Plate thickness: {PLATE_THICKNESS} mm")
+print(f"Centre hole diameter: {CENTRE_HOLE_DIAMETER} mm")
+print(f"Cut position from left edge: {CUT_POSITION_FROM_LEFT} mm")
+print(f"Cut line X coordinate: {cut_x} mm")

@@ -1,0 +1,670 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+
+# ============================================================
+# DEFAULT EDITABLE PARAMETERS
+# ============================================================
+
+inner_diameter = 130.0          # mm, 9 cm inner diameter
+wall_thickness = 2.0           # mm
+
+# Bottom drain / cable hole
+bottom_hole_diameter = 2.0    # mm
+
+# Top flange / lip
+flange_width = 10.0            # mm, sticks outward from circular top edge
+flange_thickness = 2.0         # mm
+
+# How much of the curved top edge gets a flange
+# 1.0 = full curved edge
+# 0.5 = half of the curved edge
+flange_arc_fraction = 0.3
+
+# Which end of the curved edge the flange starts from
+# "start" = start from one slice end
+# "end"   = start from the other slice end
+flange_start_from_end = "start"
+
+# Move the flange start point around the curved rim, in mm.
+# Example:
+#   0.0  = starts exactly at chosen end
+#   20.0 = starts 20 mm around the curved rim
+flange_start_offset_mm = 35.0
+
+# Slice position
+# 0.75 means the slice plane is three-quarters of the way
+# across the INNER diameter, from left to right.
+#
+# Inner circle spans x = -45 to +45.
+# 0.75 gives cut_x = +22.5 mm.
+#
+# The macro keeps the larger side and cuts off the smaller cap.
+slice_fraction_across_diameter = 0.9
+
+# Holes in the curved flange
+hole_diameter = 4.2                 # mm
+hole_spacing = 5.0                  # mm, approximate spacing along curved flange
+hole_center_from_outer_edge = 5.0   # mm
+
+# Smoothness
+arc_segments = 160
+
+object_name = "Editable_Sliced_Hemisphere_Bowl"
+
+
+# ============================================================
+# ARC RANGE HELPER
+# ============================================================
+
+def get_partial_arc_angles(
+    edge_radius,
+    cut_x,
+    arc_fraction,
+    start_from_end,
+    start_offset_mm=0.0
+):
+    """
+    Returns start/end angles for the flange section.
+
+    The sliced bowl has a remaining curved circular arc between two ends.
+
+    arc_fraction:
+      1.0 = whole remaining curved arc
+      0.5 = half of the remaining curved arc
+
+    start_from_end:
+      "start" = flange begins at the first slice end
+      "end"   = flange begins at the other slice end
+
+    start_offset_mm:
+      Moves the flange start point along the curved rim by this distance.
+    """
+
+    if abs(cut_x) >= edge_radius:
+        raise RuntimeError("cut_x must lie inside the circular top edge")
+
+    if not (0.0 < arc_fraction <= 1.0):
+        raise RuntimeError("arc_fraction must be > 0 and <= 1")
+
+    if start_offset_mm < 0:
+        raise RuntimeError("FlangeStartOffsetMm must be >= 0")
+
+    theta_start_full = math.acos(cut_x / edge_radius)
+    theta_end_full = 2.0 * math.pi - theta_start_full
+
+    full_arc_angle = theta_end_full - theta_start_full
+    full_arc_length = edge_radius * full_arc_angle
+
+    used_arc_length = full_arc_length * arc_fraction
+    used_arc_angle = used_arc_length / edge_radius
+
+    offset_angle = start_offset_mm / edge_radius
+
+    start_from_end = str(start_from_end).lower().strip()
+
+    if start_from_end == "start":
+        theta_start = theta_start_full + offset_angle
+        theta_end = theta_start + used_arc_angle
+
+        if theta_end > theta_end_full:
+            theta_end = theta_end_full
+
+    elif start_from_end == "end":
+        theta_end = theta_end_full - offset_angle
+        theta_start = theta_end - used_arc_angle
+
+        if theta_start < theta_start_full:
+            theta_start = theta_start_full
+
+    else:
+        raise RuntimeError('FlangeStartFromEnd must be either "start" or "end"')
+
+    if theta_end <= theta_start:
+        raise RuntimeError("Flange offset is too large for the available curved edge")
+
+    return theta_start, theta_end
+
+
+# ============================================================
+# SHAPE BUILDER
+# ============================================================
+
+def make_arc_band_face(
+    inner_radius,
+    outer_radius,
+    cut_x,
+    segments,
+    arc_fraction=1.0,
+    start_from_end="start",
+    start_offset_mm=0.0
+):
+    """
+    Makes a flat annular arc band.
+
+    This is NOT a full circular ring.
+
+    It only follows part of the curved circular top edge of the sliced bowl.
+    There is no flange along the straight sliced edge.
+    """
+
+    theta_start, theta_end = get_partial_arc_angles(
+        edge_radius=inner_radius,
+        cut_x=cut_x,
+        arc_fraction=arc_fraction,
+        start_from_end=start_from_end,
+        start_offset_mm=start_offset_mm
+    )
+
+    pts = []
+
+    # Outer arc
+    for i in range(segments + 1):
+        t = theta_start + (theta_end - theta_start) * i / segments
+        pts.append(
+            App.Vector(
+                outer_radius * math.cos(t),
+                outer_radius * math.sin(t),
+                0
+            )
+        )
+
+    # Inner arc, reversed
+    for i in range(segments, -1, -1):
+        t = theta_start + (theta_end - theta_start) * i / segments
+        pts.append(
+            App.Vector(
+                inner_radius * math.cos(t),
+                inner_radius * math.sin(t),
+                0
+            )
+        )
+
+    pts.append(pts[0])
+
+    wire = Part.makePolygon(pts)
+    face = Part.Face(wire)
+    return face
+
+
+def make_hole_centres_on_curved_flange(
+    edge_radius,
+    hole_path_radius,
+    cut_x,
+    hole_spacing,
+    arc_fraction=1.0,
+    start_from_end="start",
+    start_offset_mm=0.0
+):
+    """
+    Places holes only around the partial curved flange.
+
+    There are no holes along the straight sliced edge.
+    """
+
+    theta_start, theta_end = get_partial_arc_angles(
+        edge_radius=edge_radius,
+        cut_x=cut_x,
+        arc_fraction=arc_fraction,
+        start_from_end=start_from_end,
+        start_offset_mm=start_offset_mm
+    )
+
+    arc_angle = theta_end - theta_start
+    arc_length = hole_path_radius * arc_angle
+
+    number_of_holes = max(1, int(arc_length / hole_spacing))
+
+    centres = []
+
+    # Offset by half a spacing so holes do not land exactly on the flange ends.
+    for i in range(number_of_holes):
+        t = theta_start + arc_angle * (i + 0.5) / number_of_holes
+
+        centres.append(
+            App.Vector(
+                hole_path_radius * math.cos(t),
+                hole_path_radius * math.sin(t),
+                0
+            )
+        )
+
+    return centres
+
+
+def make_sliced_hemisphere_bowl_shape(obj):
+    """
+    Builds the final solid from editable object properties.
+    """
+
+    inner_d = float(obj.InnerDiameter)
+    wall = float(obj.WallThickness)
+
+    bottom_hole_d = float(obj.BottomHoleDiameter)
+
+    flange_w = float(obj.FlangeWidth)
+    flange_t = float(obj.FlangeThickness)
+    flange_arc_fraction_val = float(obj.FlangeArcFraction)
+    flange_start_from_end_val = str(obj.FlangeStartFromEnd)
+    flange_start_offset_mm_val = float(obj.FlangeStartOffsetMm)
+
+    slice_frac = float(obj.SliceFractionAcrossDiameter)
+
+    hole_d = float(obj.HoleDiameter)
+    hole_spacing_val = float(obj.HoleSpacing)
+    hole_edge_offset = float(obj.HoleCenterFromOuterEdge)
+
+    segments = int(obj.ArcSegments)
+
+    # ------------------------------
+    # Validation
+    # ------------------------------
+
+    if inner_d <= 0:
+        raise RuntimeError("InnerDiameter must be > 0")
+
+    if wall <= 0:
+        raise RuntimeError("WallThickness must be > 0")
+
+    if bottom_hole_d <= 0:
+        raise RuntimeError("BottomHoleDiameter must be > 0")
+
+    if bottom_hole_d >= inner_d:
+        raise RuntimeError("BottomHoleDiameter must be smaller than InnerDiameter")
+
+    if flange_w <= 0:
+        raise RuntimeError("FlangeWidth must be > 0")
+
+    if flange_t <= 0:
+        raise RuntimeError("FlangeThickness must be > 0")
+
+    if not (0.0 < flange_arc_fraction_val <= 1.0):
+        raise RuntimeError("FlangeArcFraction must be > 0 and <= 1")
+
+    if flange_start_from_end_val not in ["start", "end"]:
+        raise RuntimeError('FlangeStartFromEnd must be either "start" or "end"')
+
+    if flange_start_offset_mm_val < 0:
+        raise RuntimeError("FlangeStartOffsetMm must be >= 0")
+
+    if not (0.05 < slice_frac < 0.95):
+        raise RuntimeError("SliceFractionAcrossDiameter should be between 0.05 and 0.95")
+
+    if hole_d <= 0:
+        raise RuntimeError("HoleDiameter must be > 0")
+
+    if hole_spacing_val <= 0:
+        raise RuntimeError("HoleSpacing must be > 0")
+
+    if hole_edge_offset <= hole_d / 2.0:
+        raise RuntimeError("HoleCenterFromOuterEdge must be greater than hole radius")
+
+    if hole_edge_offset >= flange_w:
+        raise RuntimeError("HoleCenterFromOuterEdge should be smaller than FlangeWidth")
+
+    if segments < 32:
+        segments = 32
+
+    # ------------------------------
+    # Derived dimensions
+    # ------------------------------
+
+    inner_r = inner_d / 2.0
+    outer_r = inner_r + wall
+
+    flange_inner_r = outer_r
+    flange_outer_r = outer_r + flange_w
+    hole_path_r = flange_outer_r - hole_edge_offset
+
+    hole_r = hole_d / 2.0
+    bottom_hole_r = bottom_hole_d / 2.0
+
+    # Slice plane x position.
+    # Inner circle goes from -inner_r to +inner_r.
+    cut_x = -inner_r + slice_frac * inner_d
+
+    # Use a large enough box for cuts.
+    big = 4.0 * (flange_outer_r + 20.0)
+
+    # ========================================================
+    # TRUE HEMISPHERICAL SHELL
+    # ========================================================
+    # Coordinate setup:
+    #
+    # - Top opening is on the XY plane at z = 0.
+    # - The bowl curves downward into negative Z.
+    # - It is a true spherical shell.
+    #
+    # Outer lower hemisphere:
+    # full outer sphere minus everything above z = 0.
+    #
+    # Inner cavity:
+    # full inner sphere subtracted from the lower hemisphere.
+    #
+    # Then a vertical box cuts off the right-hand cap at x = cut_x.
+
+    outer_sphere = Part.makeSphere(
+        outer_r,
+        App.Vector(0, 0, 0)
+    )
+
+    upper_cut_box = Part.makeBox(
+        big,
+        big,
+        big,
+        App.Vector(-big / 2.0, -big / 2.0, 0)
+    )
+
+    outer_lower_hemisphere = outer_sphere.cut(upper_cut_box)
+
+    inner_sphere = Part.makeSphere(
+        inner_r,
+        App.Vector(0, 0, 0)
+    )
+
+    shell = outer_lower_hemisphere.cut(inner_sphere)
+
+    # Slice off one side of the hemisphere.
+    # This removes x > cut_x.
+    slice_cut_box = Part.makeBox(
+        big,
+        big,
+        big,
+        App.Vector(cut_x, -big / 2.0, -big)
+    )
+
+    shell = shell.cut(slice_cut_box)
+
+    # ========================================================
+    # 13 MM BOTTOM HOLE
+    # ========================================================
+    # This cuts a vertical cylindrical hole through the lowest point
+    # of the hemispherical shell.
+    #
+    # Bowl bottom is approximately at z = -outer_r.
+    # Inner bottom is approximately at z = -inner_r.
+    #
+    # The cutter starts below the outside and goes upward past the shell.
+
+    bottom_hole_cyl = Part.makeCylinder(
+        bottom_hole_r,
+        wall + 6.0,
+        App.Vector(0, 0, -outer_r - 3.0),
+        App.Vector(0, 0, 1),
+        360
+    )
+
+    shell = shell.cut(bottom_hole_cyl)
+
+    # ========================================================
+    # PARTIAL CURVED TOP FLANGE ONLY
+    # ========================================================
+    # The flange is a flat horizontal band at the top.
+    # It follows only part of the circular top edge.
+    # It does NOT run along the straight sliced-off edge.
+    #
+    # The start position can be moved using FlangeStartOffsetMm.
+
+    flange_face = make_arc_band_face(
+        inner_radius=flange_inner_r,
+        outer_radius=flange_outer_r,
+        cut_x=cut_x,
+        segments=segments,
+        arc_fraction=flange_arc_fraction_val,
+        start_from_end=flange_start_from_end_val,
+        start_offset_mm=flange_start_offset_mm_val
+    )
+
+    # Put the flange from z = 0 downwards.
+    # That keeps the top surface of the part at z = 0.
+    flange = flange_face.extrude(App.Vector(0, 0, -flange_t))
+
+    # Fuse flange to the hemispherical shell.
+    shape = shell.fuse(flange)
+
+    # ========================================================
+    # HOLES ONLY AROUND THE PARTIAL CURVED FLANGE
+    # ========================================================
+
+    centres = make_hole_centres_on_curved_flange(
+        edge_radius=flange_inner_r,
+        hole_path_radius=hole_path_r,
+        cut_x=cut_x,
+        hole_spacing=hole_spacing_val,
+        arc_fraction=flange_arc_fraction_val,
+        start_from_end=flange_start_from_end_val,
+        start_offset_mm=flange_start_offset_mm_val
+    )
+
+    for c in centres:
+        hole_cyl = Part.makeCylinder(
+            hole_r,
+            flange_t + 2.0,
+            App.Vector(c.x, c.y, 1.0),
+            App.Vector(0, 0, -1),
+            360
+        )
+
+        shape = shape.cut(hole_cyl)
+
+    # Clean up the result
+    try:
+        shape = shape.removeSplitter()
+    except:
+        pass
+
+    return shape
+
+
+# ============================================================
+# PARAMETRIC FEATURE OBJECT
+# ============================================================
+
+class SlicedHemisphereBowlProxy:
+    def execute(self, obj):
+        required = [
+            "InnerDiameter",
+            "WallThickness",
+            "BottomHoleDiameter",
+            "FlangeWidth",
+            "FlangeThickness",
+            "FlangeArcFraction",
+            "FlangeStartFromEnd",
+            "FlangeStartOffsetMm",
+            "SliceFractionAcrossDiameter",
+            "HoleDiameter",
+            "HoleSpacing",
+            "HoleCenterFromOuterEdge",
+            "ArcSegments",
+        ]
+
+        for prop in required:
+            if not hasattr(obj, prop):
+                return
+
+        obj.Shape = make_sliced_hemisphere_bowl_shape(obj)
+
+
+class ViewProviderSlicedHemisphereBowl:
+    def __init__(self, view_obj):
+        view_obj.Proxy = self
+
+    def attach(self, view_obj):
+        self.ViewObject = view_obj
+
+    def getDisplayModes(self, view_obj):
+        return []
+
+    def getDefaultDisplayMode(self):
+        return "Shaded"
+
+    def setDisplayMode(self, mode):
+        return mode
+
+    def updateData(self, obj, prop):
+        pass
+
+    def onChanged(self, view_obj, prop):
+        pass
+
+
+# ============================================================
+# DOCUMENT SETUP
+# ============================================================
+
+doc = App.ActiveDocument
+if doc is None:
+    doc = App.newDocument("Sliced_Hemisphere_Bowl")
+
+# Remove old object with same name
+old = doc.getObject(object_name)
+if old:
+    doc.removeObject(old.Name)
+    doc.recompute()
+
+obj = doc.addObject("Part::FeaturePython", object_name)
+
+# ============================================================
+# ADD EDITABLE PROPERTIES
+# ============================================================
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "InnerDiameter",
+    "Bowl Parameters",
+    "Inner diameter of the hemispherical bowl in mm"
+)
+obj.InnerDiameter = inner_diameter
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "WallThickness",
+    "Bowl Parameters",
+    "Wall thickness in mm"
+)
+obj.WallThickness = wall_thickness
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "BottomHoleDiameter",
+    "Bowl Parameters",
+    "Diameter of the hole at the bottom of the bowl in mm"
+)
+obj.BottomHoleDiameter = bottom_hole_diameter
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "FlangeWidth",
+    "Flange Parameters",
+    "Outward flange width in mm"
+)
+obj.FlangeWidth = flange_width
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "FlangeThickness",
+    "Flange Parameters",
+    "Vertical thickness of the top flange in mm"
+)
+obj.FlangeThickness = flange_thickness
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "FlangeArcFraction",
+    "Flange Parameters",
+    "Fraction of the curved top edge that gets a flange. 1.0 = full arc, 0.5 = half arc."
+)
+obj.FlangeArcFraction = flange_arc_fraction
+
+obj.addProperty(
+    "App::PropertyEnumeration",
+    "FlangeStartFromEnd",
+    "Flange Parameters",
+    "Which end of the curved edge the flange starts from."
+)
+obj.FlangeStartFromEnd = ["start", "end"]
+obj.FlangeStartFromEnd = flange_start_from_end
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "FlangeStartOffsetMm",
+    "Flange Parameters",
+    "Moves the start of the flange around the curved rim, measured in mm."
+)
+obj.FlangeStartOffsetMm = flange_start_offset_mm
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "SliceFractionAcrossDiameter",
+    "Slice Parameters",
+    "Slice location across the inner diameter. 0.75 means three-quarters across."
+)
+obj.SliceFractionAcrossDiameter = slice_fraction_across_diameter
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "HoleDiameter",
+    "Hole Parameters",
+    "Hole diameter in mm"
+)
+obj.HoleDiameter = hole_diameter
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "HoleSpacing",
+    "Hole Parameters",
+    "Approximate spacing between hole centres along curved flange"
+)
+obj.HoleSpacing = hole_spacing
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "HoleCenterFromOuterEdge",
+    "Hole Parameters",
+    "Hole centre distance inward from the outer flange edge"
+)
+obj.HoleCenterFromOuterEdge = hole_center_from_outer_edge
+
+obj.addProperty(
+    "App::PropertyInteger",
+    "ArcSegments",
+    "Quality",
+    "Number of segments used to approximate circular arcs"
+)
+obj.ArcSegments = arc_segments
+
+# Attach proxy after properties exist
+obj.Proxy = SlicedHemisphereBowlProxy()
+
+# View provider
+if App.GuiUp:
+    ViewProviderSlicedHemisphereBowl(obj.ViewObject)
+
+doc.recompute()
+
+# ============================================================
+# VIEW
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except:
+    pass
+
+try:
+    for thing in doc.Objects:
+        try:
+            thing.ViewObject.Visibility = False
+        except:
+            pass
+
+    obj.ViewObject.Visibility = True
+    obj.ViewObject.DisplayMode = "Shaded"
+except:
+    pass
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

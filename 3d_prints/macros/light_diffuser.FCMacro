@@ -1,0 +1,236 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+# ============================================================
+# DEFAULT EDITABLE PARAMETERS
+# ============================================================
+
+outer_diameter = 38.0          # mm, about 3.9 cm outside diameter
+wall_thickness = 0.9           # mm
+
+# Bottom cut amount
+# 0.25 = cut off the bottom quarter of the sphere height
+# 0.50 = cut off the bottom half
+# 0.10 = cut off only the bottom 10%
+bottom_cut_fraction = 0.075
+
+object_name = "Editable_Cut_Off_Hollow_Sphere"
+
+
+# ============================================================
+# SHAPE BUILDER
+# ============================================================
+
+def make_cut_off_hollow_sphere_shape(obj):
+    """
+    Builds a hollow sphere shell with the bottom portion cut off.
+
+    Coordinate setup:
+      Sphere centre is at (0, 0, 0)
+      Full sphere extends from z = -outer_radius to z = +outer_radius
+
+    bottom_cut_fraction:
+      0.25 cuts off the bottom quarter of the full sphere height.
+    """
+
+    outer_d = float(obj.OuterDiameter)
+    wall = float(obj.WallThickness)
+    cut_frac = float(obj.BottomCutFraction)
+
+    # ------------------------------
+    # Validation
+    # ------------------------------
+
+    if outer_d <= 0:
+        raise RuntimeError("OuterDiameter must be > 0")
+
+    if wall <= 0:
+        raise RuntimeError("WallThickness must be > 0")
+
+    if wall >= outer_d / 2.0:
+        raise RuntimeError("WallThickness must be smaller than the sphere radius")
+
+    if not (0.0 <= cut_frac < 1.0):
+        raise RuntimeError("BottomCutFraction must be >= 0 and < 1")
+
+    # ------------------------------
+    # Derived dimensions
+    # ------------------------------
+
+    outer_r = outer_d / 2.0
+    inner_r = outer_r - wall
+
+    # Full sphere height is outer_d.
+    # Bottom is z = -outer_r.
+    # If cut_frac = 0.25, the cut plane is one quarter up from the bottom.
+    cut_z = -outer_r + cut_frac * outer_d
+
+    big = outer_d * 4.0 + 50.0
+
+    # ========================================================
+    # OUTER SPHERE
+    # ============================================================
+
+    outer_sphere = Part.makeSphere(
+        outer_r,
+        App.Vector(0, 0, 0)
+    )
+
+    # ========================================================
+    # INNER CAVITY
+    # ============================================================
+
+    inner_sphere = Part.makeSphere(
+        inner_r,
+        App.Vector(0, 0, 0)
+    )
+
+    shell = outer_sphere.cut(inner_sphere)
+
+    # ========================================================
+    # CUT OFF BOTTOM PORTION
+    # ============================================================
+    # Remove everything below cut_z.
+
+    bottom_cut_box = Part.makeBox(
+        big,
+        big,
+        big,
+        App.Vector(
+            -big / 2.0,
+            -big / 2.0,
+            cut_z - big
+        )
+    )
+
+    shell = shell.cut(bottom_cut_box)
+
+    try:
+        shell = shell.removeSplitter()
+    except Exception:
+        pass
+
+    return shell
+
+
+# ============================================================
+# PARAMETRIC FEATURE OBJECT
+# ============================================================
+
+class CutOffHollowSphereProxy:
+    def execute(self, obj):
+        required = [
+            "OuterDiameter",
+            "WallThickness",
+            "BottomCutFraction",
+        ]
+
+        for prop in required:
+            if not hasattr(obj, prop):
+                return
+
+        obj.Shape = make_cut_off_hollow_sphere_shape(obj)
+
+
+class ViewProviderCutOffHollowSphere:
+    def __init__(self, view_obj):
+        view_obj.Proxy = self
+
+    def attach(self, view_obj):
+        self.ViewObject = view_obj
+
+    def getDisplayModes(self, view_obj):
+        return []
+
+    def getDefaultDisplayMode(self):
+        return "Shaded"
+
+    def setDisplayMode(self, mode):
+        return mode
+
+    def updateData(self, obj, prop):
+        pass
+
+    def onChanged(self, view_obj, prop):
+        pass
+
+
+# ============================================================
+# DOCUMENT SETUP
+# ============================================================
+
+doc = App.ActiveDocument
+if doc is None:
+    doc = App.newDocument("Cut_Off_Hollow_Sphere")
+
+# Remove old object with same name
+old = doc.getObject(object_name)
+if old:
+    doc.removeObject(old.Name)
+    doc.recompute()
+
+# Create object before assigning proxy
+obj = doc.addObject("Part::FeaturePython", object_name)
+
+# ============================================================
+# ADD EDITABLE PROPERTIES
+# ============================================================
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "OuterDiameter",
+    "Sphere Parameters",
+    "Outside diameter of the sphere in mm"
+)
+obj.OuterDiameter = outer_diameter
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "WallThickness",
+    "Sphere Parameters",
+    "Wall thickness in mm"
+)
+obj.WallThickness = wall_thickness
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "BottomCutFraction",
+    "Cut Parameters",
+    "Fraction of the full sphere height cut off from the bottom. 0.25 = bottom quarter."
+)
+obj.BottomCutFraction = bottom_cut_fraction
+
+# Attach proxy after properties exist
+obj.Proxy = CutOffHollowSphereProxy()
+
+if App.GuiUp:
+    ViewProviderCutOffHollowSphere(obj.ViewObject)
+
+doc.recompute()
+
+# ============================================================
+# VIEW
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except Exception:
+    pass
+
+try:
+    for thing in doc.Objects:
+        try:
+            thing.ViewObject.Visibility = False
+        except Exception:
+            pass
+
+    obj.ViewObject.Visibility = True
+    obj.ViewObject.DisplayMode = "Shaded"
+except Exception:
+    pass
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

@@ -1,0 +1,272 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Sketcher
+
+# ============================================================
+# EDITABLE PARAMETERS (all dimensions in mm)
+# ============================================================
+
+# Plate
+plate_width = 80.0          # horizontal, X direction
+plate_height = 110.0        # vertical, Y direction
+plate_thickness = 2.0
+
+# Three rows of holes near the top edge
+upper_hole_diameter = 4.2
+upper_hole_spacing_x = 8.0
+upper_hole_spacing_y = 8.0
+upper_hole_first_row_from_top = 8.0
+upper_hole_left_margin = 8.0
+upper_hole_right_margin = 8.0
+upper_hole_rows = 3
+
+# Four mounting holes forming a centred rectangle
+mount_hole_diameter = 2.5
+mount_hole_spacing_x = 49.0
+mount_hole_spacing_y = 58.0
+mount_bottom_row_from_bottom = 5.0
+
+body_name = "Editable_72x100_Hole_Plate"
+
+
+# ============================================================
+# VALIDATION AND DERIVED VALUES
+# ============================================================
+
+if plate_width <= 0 or plate_height <= 0 or plate_thickness <= 0:
+    raise RuntimeError("Plate dimensions and thickness must be positive.")
+
+if upper_hole_diameter <= 0 or upper_hole_spacing_x <= 0 or upper_hole_spacing_y <= 0:
+    raise RuntimeError("Upper-hole diameter and spacing must be positive.")
+
+if upper_hole_rows < 1:
+    raise RuntimeError("upper_hole_rows must be at least 1.")
+
+if upper_hole_left_margin < upper_hole_diameter / 2.0:
+    raise RuntimeError("upper_hole_left_margin is too small for the upper holes.")
+
+if upper_hole_right_margin < upper_hole_diameter / 2.0:
+    raise RuntimeError("upper_hole_right_margin is too small for the upper holes.")
+
+if upper_hole_first_row_from_top < upper_hole_diameter / 2.0:
+    raise RuntimeError("The first upper-hole row is too close to the top edge.")
+
+usable_upper_width = plate_width - upper_hole_left_margin - upper_hole_right_margin
+upper_holes_per_row = int(usable_upper_width // upper_hole_spacing_x) + 1
+
+if upper_holes_per_row < 1:
+    raise RuntimeError("No upper holes fit using the selected margins and spacing.")
+
+upper_grid_width = (upper_holes_per_row - 1) * upper_hole_spacing_x
+upper_grid_start_x = (plate_width - upper_grid_width) / 2.0
+
+upper_last_row_y = (
+    plate_height
+    - upper_hole_first_row_from_top
+    - (upper_hole_rows - 1) * upper_hole_spacing_y
+)
+
+if upper_last_row_y < upper_hole_diameter / 2.0:
+    raise RuntimeError("The upper-hole rows extend below the plate.")
+
+if mount_hole_diameter <= 0:
+    raise RuntimeError("mount_hole_diameter must be positive.")
+
+if mount_hole_spacing_x <= 0 or mount_hole_spacing_y <= 0:
+    raise RuntimeError("Mounting-hole spacing must be positive.")
+
+mount_left_x = (plate_width - mount_hole_spacing_x) / 2.0
+mount_right_x = mount_left_x + mount_hole_spacing_x
+mount_bottom_y = mount_bottom_row_from_bottom
+mount_top_y = mount_bottom_y + mount_hole_spacing_y
+mount_radius = mount_hole_diameter / 2.0
+
+if mount_left_x < mount_radius or mount_right_x > plate_width - mount_radius:
+    raise RuntimeError("The mounting holes do not fit horizontally on the plate.")
+
+if mount_bottom_y < mount_radius or mount_top_y > plate_height - mount_radius:
+    raise RuntimeError("The mounting holes do not fit vertically on the plate.")
+
+
+# ============================================================
+# DOCUMENT AND BODY
+# ============================================================
+
+doc = App.ActiveDocument
+if doc is None:
+    doc = App.newDocument("Editable_Hole_Plate")
+
+old_body = doc.getObject(body_name)
+if old_body:
+    doc.removeObject(old_body.Name)
+    doc.recompute()
+
+body = doc.addObject("PartDesign::Body", body_name)
+
+
+def get_xy_plane(body_obj):
+    for feature in body_obj.Origin.OriginFeatures:
+        if feature.Name == "XY_Plane":
+            return feature
+    return body_obj.Origin.OriginFeatures[3]
+
+
+def attach_to_xy_plane(sketch_obj, plane_obj):
+    sketch_obj.MapMode = "FlatFace"
+    if hasattr(sketch_obj, "AttachmentSupport"):
+        sketch_obj.AttachmentSupport = [(plane_obj, "")]
+    else:
+        sketch_obj.Support = (plane_obj, [""])
+
+
+def add_rectangle(sketch_obj, x0, y0, x1, y1):
+    points = [
+        App.Vector(x0, y0, 0),
+        App.Vector(x1, y0, 0),
+        App.Vector(x1, y1, 0),
+        App.Vector(x0, y1, 0),
+    ]
+
+    lines = []
+    for index in range(4):
+        lines.append(
+            sketch_obj.addGeometry(
+                Part.LineSegment(points[index], points[(index + 1) % 4]),
+                False,
+            )
+        )
+
+    for index in range(4):
+        sketch_obj.addConstraint(
+            Sketcher.Constraint(
+                "Coincident",
+                lines[index], 2,
+                lines[(index + 1) % 4], 1,
+            )
+        )
+
+    sketch_obj.addConstraint(Sketcher.Constraint("Horizontal", lines[0]))
+    sketch_obj.addConstraint(Sketcher.Constraint("Vertical", lines[1]))
+    sketch_obj.addConstraint(Sketcher.Constraint("Horizontal", lines[2]))
+    sketch_obj.addConstraint(Sketcher.Constraint("Vertical", lines[3]))
+    return lines
+
+
+def add_constrained_circle(sketch_obj, x, y, radius):
+    circle = sketch_obj.addGeometry(
+        Part.Circle(App.Vector(x, y, 0), App.Vector(0, 0, 1), radius),
+        False,
+    )
+    sketch_obj.addConstraint(Sketcher.Constraint("Radius", circle, radius))
+    sketch_obj.addConstraint(
+        Sketcher.Constraint("DistanceX", -1, 1, circle, 3, x)
+    )
+    sketch_obj.addConstraint(
+        Sketcher.Constraint("DistanceY", -1, 1, circle, 3, y)
+    )
+    return circle
+
+
+xy_plane = get_xy_plane(body)
+
+
+# ============================================================
+# BASE SKETCH AND PAD
+# ============================================================
+
+base_sketch = body.newObject("Sketcher::SketchObject", "Base_Sketch")
+attach_to_xy_plane(base_sketch, xy_plane)
+
+base_lines = add_rectangle(base_sketch, 0.0, 0.0, plate_width, plate_height)
+
+# Anchor the lower-left corner at the origin.
+base_sketch.addConstraint(
+    Sketcher.Constraint("Coincident", base_lines[0], 1, -1, 1)
+)
+
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceX", base_lines[0], 1, base_lines[0], 2, plate_width
+    )
+)
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceY", base_lines[1], 1, base_lines[1], 2, plate_height
+    )
+)
+
+doc.recompute()
+
+base_pad = body.newObject("PartDesign::Pad", "Base_Pad")
+base_pad.Profile = base_sketch
+base_pad.Length = plate_thickness
+
+doc.recompute()
+
+
+# ============================================================
+# HOLE SKETCH
+# ============================================================
+
+hole_sketch = body.newObject("Sketcher::SketchObject", "Hole_Sketch")
+attach_to_xy_plane(hole_sketch, xy_plane)
+
+upper_radius = upper_hole_diameter / 2.0
+
+# Three horizontal rows near the top edge.
+for row in range(upper_hole_rows):
+    hole_y = plate_height - upper_hole_first_row_from_top - row * upper_hole_spacing_y
+
+    for column in range(upper_holes_per_row):
+        hole_x = upper_grid_start_x + column * upper_hole_spacing_x
+        add_constrained_circle(hole_sketch, hole_x, hole_y, upper_radius)
+
+# Four mounting holes at the corners of the centred 49 x 58 mm rectangle.
+mount_positions = [
+    (mount_left_x, mount_bottom_y),
+    (mount_right_x, mount_bottom_y),
+    (mount_left_x, mount_top_y),
+    (mount_right_x, mount_top_y),
+]
+
+for hole_x, hole_y in mount_positions:
+    add_constrained_circle(hole_sketch, hole_x, hole_y, mount_radius)
+
+doc.recompute()
+
+
+# ============================================================
+# POCKET
+# ============================================================
+
+hole_pocket = body.newObject("PartDesign::Pocket", "Hole_Pocket")
+hole_pocket.Profile = hole_sketch
+hole_pocket.Length = plate_thickness + 0.5
+hole_pocket.Reversed = False
+
+doc.recompute()
+
+
+# ============================================================
+# VIEW AND VISIBILITY
+# ============================================================
+
+base_sketch.Visibility = False
+base_pad.Visibility = False
+hole_sketch.Visibility = False
+hole_pocket.Visibility = True
+body.Visibility = True
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except Exception:
+    pass
+
+Gui.activeDocument().activeView().viewTop()
+Gui.SendMsgToActiveView("ViewFit")
+doc.recompute()
+
+print("Created editable 72 x 100 mm plate.")
+print("Upper holes per row:", upper_holes_per_row)
+print("Upper-hole grid starts at X =", upper_grid_start_x)

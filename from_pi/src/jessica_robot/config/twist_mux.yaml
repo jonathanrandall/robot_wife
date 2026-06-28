@@ -1,0 +1,14 @@
+# Priority mux between manual (joystick) and autonomous (chatbot/nav) velocity.
+# Joystick wins whenever it is active, so manual override always takes over.
+/**:
+  ros__parameters:
+    use_stamped: false   # plain Twist in, Twist out (twist_stamper stamps it after)
+    topics:
+      joystick:
+        topic   : /cmd_vel_joy
+        timeout : 0.5
+        priority: 100
+      autonomous:
+        topic   : /cmd_vel
+        timeout : 0.5
+        priority: 10

@@ -1,0 +1,366 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Sketcher
+
+# ============================================================
+# EDITABLE PARAMETERS
+# ============================================================
+
+# Inner box dimensions
+inner_length = 47.0      # X direction, mm
+inner_width = 37.0       # Y direction, mm
+
+# Wall and bottom
+wall_thickness = 2.0     # mm
+bottom_thickness = 2.5   # mm
+total_height = 40.0      # mm
+
+# Mounting rails / sticky-out long edges
+# This is the full X length of the long mounting rails.
+# The actual box outer length is inner_length + 2 * wall_thickness.
+# So if mounting_total_length is larger, the rails stick out past the short ends.
+mounting_total_length = 80.0   # mm
+
+# Width of each mounting rail outside the long box walls.
+# Must be wide enough for 4.2 mm holes.
+mounting_flange_width = 8.0    # mm
+
+# Grid holes
+hole_diameter = 4.2            # mm
+hole_radius = hole_diameter / 2.0
+hole_spacing = 8.0             # mm
+hole_center_from_rail_end = 4.0 # mm
+
+# Names
+body_name = "Editable_Grid_Box"
+
+# ============================================================
+# VALIDATION
+# ============================================================
+
+if wall_thickness <= 0:
+    raise RuntimeError("wall_thickness must be > 0")
+
+if bottom_thickness <= 0:
+    raise RuntimeError("bottom_thickness must be > 0")
+
+if total_height <= bottom_thickness:
+    raise RuntimeError("total_height must be greater than bottom_thickness")
+
+if mounting_flange_width <= hole_diameter:
+    raise RuntimeError("mounting_flange_width should be larger than hole_diameter")
+
+# ============================================================
+# DOCUMENT
+# ============================================================
+
+doc = App.ActiveDocument
+if doc is None:
+    doc = App.newDocument("Editable_Grid_Box")
+
+# ============================================================
+# GET OR CREATE BODY
+# ============================================================
+
+body = None
+
+sel = Gui.Selection.getSelection()
+for obj in sel:
+    if obj.TypeId == "PartDesign::Body":
+        body = obj
+        break
+
+if body is None:
+    for obj in doc.Objects:
+        if obj.TypeId == "PartDesign::Body" and obj.Name == body_name:
+            body = obj
+            break
+
+if body is None:
+    body = doc.addObject("PartDesign::Body", body_name)
+    doc.recompute()
+
+# ============================================================
+# REMOVE OLD GENERATED FEATURES
+# ============================================================
+
+names_to_remove = [
+    "BottomAndMountingRailSketch",
+    "BottomAndMountingRailPad",
+    "WallSketch",
+    "WallPad",
+    "MountingHoleSketch",
+    "MountingHolePocket",
+]
+
+for obj in list(doc.Objects):
+    if obj.Name in names_to_remove:
+        try:
+            doc.removeObject(obj.Name)
+        except:
+            pass
+
+doc.recompute()
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def xy_plane_of_body(body_obj):
+    for obj in body_obj.Origin.OriginFeatures:
+        if obj.Name == "XY_Plane":
+            return obj
+
+    # Fallback for some FreeCAD versions
+    return body_obj.Origin.OriginFeatures[3]
+
+
+def attach_to_support(obj, support_obj):
+    obj.MapMode = "FlatFace"
+
+    if hasattr(obj, "AttachmentSupport"):
+        obj.AttachmentSupport = [(support_obj, "")]
+    elif hasattr(obj, "Support"):
+        obj.Support = (support_obj, [""])
+    else:
+        raise RuntimeError("This FreeCAD version does not expose Support/AttachmentSupport")
+
+
+def add_closed_polyline(sketch, pts):
+    lines = []
+    n = len(pts)
+
+    for i in range(n):
+        line = sketch.addGeometry(
+            Part.LineSegment(pts[i], pts[(i + 1) % n]),
+            False
+        )
+        lines.append(line)
+
+    for i in range(n):
+        sketch.addConstraint(
+            Sketcher.Constraint(
+                "Coincident",
+                lines[i], 2,
+                lines[(i + 1) % n], 1
+            )
+        )
+
+    # Mostly horizontal / vertical outline
+    for line in lines:
+        p1 = sketch.Geometry[line].StartPoint
+        p2 = sketch.Geometry[line].EndPoint
+
+        if abs(p1.y - p2.y) < 1e-6:
+            sketch.addConstraint(Sketcher.Constraint("Horizontal", line))
+        elif abs(p1.x - p2.x) < 1e-6:
+            sketch.addConstraint(Sketcher.Constraint("Vertical", line))
+
+    return lines
+
+
+def add_rectangle_to_sketch(sketch, x_min, y_min, x_max, y_max):
+    p1 = App.Vector(x_min, y_min, 0)
+    p2 = App.Vector(x_max, y_min, 0)
+    p3 = App.Vector(x_max, y_max, 0)
+    p4 = App.Vector(x_min, y_max, 0)
+
+    l1 = sketch.addGeometry(Part.LineSegment(p1, p2), False)
+    l2 = sketch.addGeometry(Part.LineSegment(p2, p3), False)
+    l3 = sketch.addGeometry(Part.LineSegment(p3, p4), False)
+    l4 = sketch.addGeometry(Part.LineSegment(p4, p1), False)
+
+    sketch.addConstraint(Sketcher.Constraint("Coincident", l1, 2, l2, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", l2, 2, l3, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", l3, 2, l4, 1))
+    sketch.addConstraint(Sketcher.Constraint("Coincident", l4, 2, l1, 1))
+
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", l1))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", l3))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", l2))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", l4))
+
+    sketch.addConstraint(Sketcher.Constraint("DistanceX", l1, 1, l1, 2, x_max - x_min))
+    sketch.addConstraint(Sketcher.Constraint("DistanceY", l2, 1, l2, 2, y_max - y_min))
+
+    return [l1, l2, l3, l4]
+
+
+# ============================================================
+# DIMENSIONS DERIVED FROM PARAMETERS
+# ============================================================
+
+outer_length = inner_length + 2.0 * wall_thickness
+outer_width = inner_width + 2.0 * wall_thickness
+
+if mounting_total_length < outer_length:
+    mounting_total_length = outer_length
+
+outer_half_x = outer_length / 2.0
+outer_half_y = outer_width / 2.0
+
+mount_half_x = mounting_total_length / 2.0
+mount_outer_half_y = outer_half_y + mounting_flange_width
+
+wall_height = total_height - bottom_thickness
+
+plane_xy = xy_plane_of_body(body)
+
+# ============================================================
+# BOTTOM + LONG MOUNTING RAILS SKETCH
+# ============================================================
+# Top view shape:
+#
+#   long rail sticks out past short ends
+#   ┌───────────────────────────────┐
+#   │                               │
+#   └───────┐               ┌───────┘
+#           │    box base   │
+#   ┌───────┘               └───────┐
+#   │                               │
+#   └───────────────────────────────┘
+#
+# The box itself is only outer_length x outer_width.
+# The long rails are mounting_total_length long.
+
+bottom_pts = [
+    App.Vector(-mount_half_x, -mount_outer_half_y, 0),
+    App.Vector(+mount_half_x, -mount_outer_half_y, 0),
+    App.Vector(+mount_half_x, -outer_half_y, 0),
+    App.Vector(+outer_half_x, -outer_half_y, 0),
+    App.Vector(+outer_half_x, +outer_half_y, 0),
+    App.Vector(+mount_half_x, +outer_half_y, 0),
+    App.Vector(+mount_half_x, +mount_outer_half_y, 0),
+    App.Vector(-mount_half_x, +mount_outer_half_y, 0),
+    App.Vector(-mount_half_x, +outer_half_y, 0),
+    App.Vector(-outer_half_x, +outer_half_y, 0),
+    App.Vector(-outer_half_x, -outer_half_y, 0),
+    App.Vector(-mount_half_x, -outer_half_y, 0),
+]
+
+bottom_sketch = body.newObject("Sketcher::SketchObject", "BottomAndMountingRailSketch")
+attach_to_support(bottom_sketch, plane_xy)
+add_closed_polyline(bottom_sketch, bottom_pts)
+
+doc.recompute()
+
+bottom_pad = body.newObject("PartDesign::Pad", "BottomAndMountingRailPad")
+bottom_pad.Profile = bottom_sketch
+bottom_pad.Length = bottom_thickness
+
+doc.recompute()
+
+# ============================================================
+# WALL SKETCH
+# ============================================================
+# A rectangular frame: outer rectangle minus inner rectangle.
+# This gives an open-top box with editable wall sketch.
+
+wall_sketch = body.newObject("Sketcher::SketchObject", "WallSketch")
+attach_to_support(wall_sketch, plane_xy)
+
+wall_sketch.AttachmentOffset = App.Placement(
+    App.Vector(0, 0, bottom_thickness),
+    App.Rotation()
+)
+
+# Outer wall rectangle
+add_rectangle_to_sketch(
+    wall_sketch,
+    -outer_half_x,
+    -outer_half_y,
+    +outer_half_x,
+    +outer_half_y
+)
+
+# Inner cavity rectangle
+inner_half_x = inner_length / 2.0
+inner_half_y = inner_width / 2.0
+
+add_rectangle_to_sketch(
+    wall_sketch,
+    -inner_half_x,
+    -inner_half_y,
+    +inner_half_x,
+    +inner_half_y
+)
+
+doc.recompute()
+
+wall_pad = body.newObject("PartDesign::Pad", "WallPad")
+wall_pad.Profile = wall_sketch
+wall_pad.Length = wall_height
+
+doc.recompute()
+
+# ============================================================
+# MOUNTING HOLE SKETCH
+# ============================================================
+# Holes go vertically through the two long mounting rails.
+
+hole_sketch = body.newObject("Sketcher::SketchObject", "MountingHoleSketch")
+attach_to_support(hole_sketch, plane_xy)
+
+# Hole Y positions: centre of each outside mounting rail
+bottom_hole_y = -(outer_half_y + mounting_flange_width / 2.0)
+top_hole_y = +(outer_half_y + mounting_flange_width / 2.0)
+
+# Hole X positions, 8 mm grid spacing
+hole_x_positions = []
+
+x = -mount_half_x + hole_center_from_rail_end
+while x <= mount_half_x - hole_center_from_rail_end + 0.001:
+    hole_x_positions.append(round(x, 6))
+    x += hole_spacing
+
+for x in hole_x_positions:
+    for y in [bottom_hole_y, top_hole_y]:
+        c = hole_sketch.addGeometry(
+            Part.Circle(
+                App.Vector(x, y, 0),
+                App.Vector(0, 0, 1),
+                hole_radius
+            ),
+            False
+        )
+
+        hole_sketch.addConstraint(Sketcher.Constraint("Radius", c, hole_radius))
+        hole_sketch.addConstraint(Sketcher.Constraint("DistanceX", -1, 1, c, 3, x))
+        hole_sketch.addConstraint(Sketcher.Constraint("DistanceY", -1, 1, c, 3, y))
+
+doc.recompute()
+
+hole_pocket = body.newObject("PartDesign::Pocket", "MountingHolePocket")
+hole_pocket.Profile = hole_sketch
+
+# Cut upward from the XY plane through the bottom rail.
+# It is okay if this is longer than the bottom thickness because the holes are outside the box walls.
+hole_pocket.Length = bottom_thickness + 1.0
+hole_pocket.Reversed = False
+
+doc.recompute()
+
+# ============================================================
+# VIEW
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except:
+    pass
+
+# Hide intermediate sketches/pads and show final result
+for obj in doc.Objects:
+    try:
+        obj.ViewObject.Visibility = False
+    except:
+        pass
+
+body.ViewObject.Visibility = True
+hole_pocket.ViewObject.Visibility = True
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

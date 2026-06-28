@@ -1,0 +1,23 @@
+joy_button_bridge:
+  ros__parameters:
+    # Button mappings: button_index -> command_string
+    # Each command is in the format: "command_name,argument"
+    #
+    # Standard Xbox/PS4 controller button indices:
+    #   0 = A (PS: X)
+    #   1 = B (PS: Circle)
+    #   2 = X (PS: Square)
+    #   3 = Y (PS: Triangle)
+    #   4 = LB (Left Bumper)
+    #   5 = RB (Right Bumper)
+    #   6 = Back/Select
+    #   7 = Start
+    #   8 = Logo/Home
+    #   9 = Left Stick Click
+    #  10 = Right Stick Click
+
+    button_mappings:
+      0: "center_pan_tilt,0"    # Button A - Center pan/tilt servos
+      1: "toggle_led,1"          # Button B - Toggle LED
+      3: "estop,1"               # Button X - Emergency stop
+      4: "fire"                # Button Y - fire weapon (no argument)

@@ -1,0 +1,537 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Sketcher
+
+# ============================================================
+# EDITABLE PARAMETERS
+# ============================================================
+
+# Base plate
+plate_length = 40.0          # mm, X direction
+plate_width = 88.0           # mm, Y direction
+plate_thickness = 2.0        # mm
+
+# Holes down the two short sides
+hole_diameter = 4.2          # mm
+hole_spacing = 8.0           # mm, centre-to-centre along Y
+hole_center_from_edge = 4.0  # mm inward from X edges
+hole_start_from_end = 4.0    # mm from the Y ends
+holes_on_both_sides = True
+
+# Vertical walls
+wall_thickness = 2         # mm
+wall_height = 23.0           # mm
+wall_length = 40.0           # mm, along Y
+wall_end_inset = 5.0         # mm from each Y edge
+
+# Three wall pairs / open-ended boxes
+number_of_wall_pairs = 1
+channel_inner_width = 16.0   # clear distance between each pair
+
+# Use -1 to calculate the gap automatically.
+# Defaults produce a 4 mm gap between pairs.
+inter_pair_gap = 1
+
+body_name = "Channel_Plate_Body"
+
+
+# ============================================================
+# VALIDATION AND DERIVED DIMENSIONS
+# ============================================================
+
+if plate_length <= 0 or plate_width <= 0:
+    raise RuntimeError("Plate dimensions must be greater than zero.")
+
+if plate_thickness <= 0:
+    raise RuntimeError("plate_thickness must be greater than zero.")
+
+if wall_thickness <= 0:
+    raise RuntimeError("wall_thickness must be greater than zero.")
+
+if wall_height <= 0:
+    raise RuntimeError("wall_height must be greater than zero.")
+
+if wall_length <= 0 or wall_length > plate_width:
+    raise RuntimeError("wall_length must be between 0 and plate_width.")
+
+if wall_end_inset < 0:
+    raise RuntimeError("wall_end_inset cannot be negative.")
+
+if wall_end_inset + wall_length > plate_width + 0.0001:
+    raise RuntimeError(
+        "wall_end_inset + wall_length extends beyond the plate."
+    )
+
+if number_of_wall_pairs < 1:
+    raise RuntimeError("number_of_wall_pairs must be at least 1.")
+
+if channel_inner_width <= 0:
+    raise RuntimeError("channel_inner_width must be greater than zero.")
+
+if hole_diameter <= 0:
+    raise RuntimeError("hole_diameter must be greater than zero.")
+
+if hole_spacing <= 0:
+    raise RuntimeError("hole_spacing must be greater than zero.")
+
+if hole_center_from_edge <= hole_diameter / 2.0:
+    raise RuntimeError(
+        "hole_center_from_edge must be greater than the hole radius."
+    )
+
+pair_outer_width = (
+    wall_thickness
+    + channel_inner_width
+    + wall_thickness
+)
+
+all_pairs_width = number_of_wall_pairs * pair_outer_width
+
+if number_of_wall_pairs > 1:
+    if inter_pair_gap < 0:
+        calculated_pair_gap = (
+            plate_length - all_pairs_width
+        ) / float(number_of_wall_pairs - 1)
+    else:
+        calculated_pair_gap = inter_pair_gap
+else:
+    calculated_pair_gap = 0.0
+
+total_wall_width = (
+    all_pairs_width
+    + max(0, number_of_wall_pairs - 1) * calculated_pair_gap
+)
+
+if calculated_pair_gap < 0:
+    raise RuntimeError(
+        "The wall pairs do not fit across the plate."
+    )
+
+if total_wall_width > plate_length + 0.0001:
+    raise RuntimeError(
+        "The complete wall arrangement is wider than the plate."
+    )
+
+# Centre the wall layout if it does not fill the complete plate.
+layout_start_x = (
+    plate_length - total_wall_width
+) / 2.0
+
+
+# ============================================================
+# DOCUMENT AND BODY SETUP
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    doc = App.newDocument("Editable_Channel_Plate")
+
+# Remove the previously generated body completely.
+old_body = doc.getObject(body_name)
+
+if old_body:
+    try:
+        doc.removeObject(old_body.Name)
+        doc.recompute()
+    except Exception:
+        pass
+
+body = doc.addObject(
+    "PartDesign::Body",
+    body_name
+)
+
+doc.recompute()
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def xy_plane_of_body(body_obj):
+    """Find the XY datum plane belonging to a Part Design Body."""
+
+    for feature in body_obj.Origin.OriginFeatures:
+        if feature.Name == "XY_Plane":
+            return feature
+
+    # Fallback used by some FreeCAD versions.
+    return body_obj.Origin.OriginFeatures[3]
+
+
+def attach_to_plane(sketch, plane):
+    """Attach a sketch to a datum plane across FreeCAD versions."""
+
+    sketch.MapMode = "FlatFace"
+
+    if hasattr(sketch, "AttachmentSupport"):
+        sketch.AttachmentSupport = [(plane, "")]
+    elif hasattr(sketch, "Support"):
+        sketch.Support = (plane, [""])
+    else:
+        raise RuntimeError(
+            "This FreeCAD version does not expose sketch support."
+        )
+
+
+def add_rectangle(sketch, x_min, y_min, x_max, y_max):
+    """
+    Add an editable closed rectangle to a sketch.
+
+    Returns the four geometry indices.
+    """
+
+    p1 = App.Vector(x_min, y_min, 0)
+    p2 = App.Vector(x_max, y_min, 0)
+    p3 = App.Vector(x_max, y_max, 0)
+    p4 = App.Vector(x_min, y_max, 0)
+
+    line_1 = sketch.addGeometry(
+        Part.LineSegment(p1, p2),
+        False
+    )
+
+    line_2 = sketch.addGeometry(
+        Part.LineSegment(p2, p3),
+        False
+    )
+
+    line_3 = sketch.addGeometry(
+        Part.LineSegment(p3, p4),
+        False
+    )
+
+    line_4 = sketch.addGeometry(
+        Part.LineSegment(p4, p1),
+        False
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint(
+            "Coincident",
+            line_1, 2,
+            line_2, 1
+        )
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint(
+            "Coincident",
+            line_2, 2,
+            line_3, 1
+        )
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint(
+            "Coincident",
+            line_3, 2,
+            line_4, 1
+        )
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint(
+            "Coincident",
+            line_4, 2,
+            line_1, 1
+        )
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Horizontal", line_1)
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Vertical", line_2)
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Horizontal", line_3)
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Vertical", line_4)
+    )
+
+    return [
+        line_1,
+        line_2,
+        line_3,
+        line_4,
+    ]
+
+
+xy_plane = xy_plane_of_body(body)
+
+
+# ============================================================
+# BASE SKETCH
+# ============================================================
+
+base_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Base_Sketch"
+)
+
+attach_to_plane(base_sketch, xy_plane)
+
+base_lines = add_rectangle(
+    base_sketch,
+    0.0,
+    0.0,
+    plate_length,
+    plate_width
+)
+
+# Lock the lower-left corner to the sketch origin.
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "Coincident",
+        base_lines[0], 1,
+        -1, 1
+    )
+)
+
+# Editable size constraints.
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceX",
+        base_lines[0], 1,
+        base_lines[0], 2,
+        plate_length
+    )
+)
+
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceY",
+        base_lines[1], 1,
+        base_lines[1], 2,
+        plate_width
+    )
+)
+
+doc.recompute()
+
+
+# ============================================================
+# BASE PAD
+# ============================================================
+
+base_pad = body.newObject(
+    "PartDesign::Pad",
+    "Base_Pad"
+)
+
+base_pad.Profile = base_sketch
+base_pad.Length = plate_thickness
+
+doc.recompute()
+
+
+# ============================================================
+# WALL SKETCH
+# ============================================================
+# The wall sketch contains six independent rectangles.
+# Because all six walls touch the existing base pad, Part Design
+# can pad them as one connected result.
+
+wall_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Wall_Sketch"
+)
+
+attach_to_plane(wall_sketch, xy_plane)
+
+wall_sketch.AttachmentOffset = App.Placement(
+    App.Vector(0, 0, plate_thickness),
+    App.Rotation()
+)
+
+wall_y_min = wall_end_inset
+wall_y_max = wall_end_inset + wall_length
+
+for pair_index in range(number_of_wall_pairs):
+
+    pair_start_x = (
+        layout_start_x
+        + pair_index * (
+            pair_outer_width
+            + calculated_pair_gap
+        )
+    )
+
+    first_wall_x_min = pair_start_x
+    first_wall_x_max = (
+        first_wall_x_min
+        + wall_thickness
+    )
+
+    second_wall_x_min = (
+        first_wall_x_max
+        + channel_inner_width
+    )
+
+    second_wall_x_max = (
+        second_wall_x_min
+        + wall_thickness
+    )
+
+    add_rectangle(
+        wall_sketch,
+        first_wall_x_min,
+        wall_y_min,
+        first_wall_x_max,
+        wall_y_max
+    )
+
+    add_rectangle(
+        wall_sketch,
+        second_wall_x_min,
+        wall_y_min,
+        second_wall_x_max,
+        wall_y_max
+    )
+
+doc.recompute()
+
+
+# ============================================================
+# WALL PAD
+# ============================================================
+
+wall_pad = body.newObject(
+    "PartDesign::Pad",
+    "Wall_Pad"
+)
+
+wall_pad.Profile = wall_sketch
+wall_pad.Length = wall_height
+
+doc.recompute()
+
+
+# ============================================================
+# HOLE SKETCH
+# ============================================================
+
+hole_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Hole_Sketch"
+)
+
+attach_to_plane(hole_sketch, xy_plane)
+
+hole_sketch.AttachmentOffset = App.Placement(
+    App.Vector(0, 0, plate_thickness),
+    App.Rotation()
+)
+
+hole_radius = hole_diameter / 2.0
+
+hole_x_positions = [
+    hole_center_from_edge
+]
+
+if holes_on_both_sides:
+    hole_x_positions.append(
+        plate_length - hole_center_from_edge
+    )
+
+hole_y_positions = []
+
+y = hole_start_from_end
+
+while y <= plate_width - hole_start_from_end + 0.0001:
+    hole_y_positions.append(round(y, 6))
+    y += hole_spacing
+
+for hole_x in hole_x_positions:
+    for hole_y in hole_y_positions:
+
+        circle_index = hole_sketch.addGeometry(
+            Part.Circle(
+                App.Vector(hole_x, hole_y, 0),
+                App.Vector(0, 0, 1),
+                hole_radius
+            ),
+            False
+        )
+
+        # Radius remains editable in the sketch.
+        hole_sketch.addConstraint(
+            Sketcher.Constraint(
+                "Radius",
+                circle_index,
+                hole_radius
+            )
+        )
+
+        # Position the centre relative to the sketch origin.
+        hole_sketch.addConstraint(
+            Sketcher.Constraint(
+                "DistanceX",
+                -1, 1,
+                circle_index, 3,
+                hole_x
+            )
+        )
+
+        hole_sketch.addConstraint(
+            Sketcher.Constraint(
+                "DistanceY",
+                -1, 1,
+                circle_index, 3,
+                hole_y
+            )
+        )
+
+doc.recompute()
+
+
+# ============================================================
+# HOLE POCKET
+# ============================================================
+
+hole_pocket = body.newObject(
+    "PartDesign::Pocket",
+    "Hole_Pocket"
+)
+
+hole_pocket.Profile = hole_sketch
+hole_pocket.Length = plate_thickness + 1.0
+hole_pocket.Reversed = False
+
+doc.recompute()
+
+
+# ============================================================
+# VIEW AND VISIBILITY
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except Exception:
+    pass
+
+# Hide construction features and show the final pocket.
+try:
+    base_sketch.Visibility = False
+    base_pad.Visibility = False
+    wall_sketch.Visibility = False
+    wall_pad.Visibility = False
+    hole_sketch.Visibility = False
+
+    body.ViewObject.Visibility = True
+    hole_pocket.ViewObject.Visibility = True
+
+except Exception:
+    pass
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

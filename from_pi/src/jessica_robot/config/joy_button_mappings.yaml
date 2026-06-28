@@ -1,0 +1,9 @@
+joy_button_bridge:
+  ros__parameters:
+    # Button index -> "command_name,argument" sent to /esp32_aux_cmd (AUX,... over serial).
+    # Standard Xbox/PS layout:
+    #   0=A  1=B  2=X  3=Y  4=LB  5=RB  6=Back  7=Start  8=Logo  9=LStick  10=RStick
+    button_mappings:
+      0: "center_pan_tilt,0"   # A — recentre Jessica's head
+      1: "toggle_led,1"        # B — toggle ESP32 onboard LED
+      3: "estop,1"             # Y — emergency stop

@@ -1,0 +1,419 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Sketcher
+
+# ============================================================
+# EDITABLE PARAMETERS
+# ============================================================
+
+# Internal box dimensions
+inner_length = 68.0          # mm, X direction (long side)
+inner_width = 65.0           # mm, Y direction
+
+# Box construction
+wall_thickness = 2.0         # mm
+wall_height = 48.0           # mm above the inside floor
+base_thickness = 2.5         # mm
+
+# Horizontal flange at the BASE of the box
+flange_width = 12.0          # mm, how far it sticks outward
+flange_side = "back"         # "back" or "front"
+
+# Flange holes
+flange_hole_diameter = 4.2   # mm
+hole_spacing = 8.0           # mm, centre-to-centre along X
+first_hole_from_edge = 8.0   # mm, from the flange end along X
+
+# Position across the flange width, measured outward from the box wall
+hole_center_from_box = 6.0   # mm
+
+body_name = "Editable_Base_Flange_Box"
+
+# ============================================================
+# VALIDATION AND DERIVED DIMENSIONS
+# ============================================================
+
+if inner_length <= 0 or inner_width <= 0:
+    raise RuntimeError("Inner dimensions must be greater than zero.")
+
+if wall_thickness <= 0:
+    raise RuntimeError("wall_thickness must be greater than zero.")
+
+if wall_height <= 0:
+    raise RuntimeError("wall_height must be greater than zero.")
+
+if base_thickness <= 0:
+    raise RuntimeError("base_thickness must be greater than zero.")
+
+if flange_width <= 0:
+    raise RuntimeError("flange_width must be greater than zero.")
+
+if flange_side not in ("front", "back"):
+    raise RuntimeError('flange_side must be "front" or "back".')
+
+if flange_hole_diameter <= 0:
+    raise RuntimeError("flange_hole_diameter must be greater than zero.")
+
+if hole_spacing <= 0:
+    raise RuntimeError("hole_spacing must be greater than zero.")
+
+hole_radius = flange_hole_diameter / 2.0
+
+if first_hole_from_edge <= hole_radius:
+    raise RuntimeError(
+        "first_hole_from_edge must be greater than the hole radius."
+    )
+
+if hole_center_from_box <= hole_radius:
+    raise RuntimeError(
+        "hole_center_from_box must be greater than the hole radius."
+    )
+
+if hole_center_from_box >= flange_width - hole_radius:
+    raise RuntimeError(
+        "The hole centres are too close to the outer flange edge."
+    )
+
+outer_length = inner_length + 2.0 * wall_thickness
+outer_width = inner_width + 2.0 * wall_thickness
+
+# Flange rectangle coordinates
+if flange_side == "back":
+    flange_y_min = outer_width
+    flange_y_max = outer_width + flange_width
+    hole_y = outer_width + hole_center_from_box
+else:
+    flange_y_min = -flange_width
+    flange_y_max = 0.0
+    hole_y = -hole_center_from_box
+
+# Hole positions along the long side.
+# The first hole centre is first_hole_from_edge from one end.
+# Additional holes are spaced by hole_spacing.
+hole_x_positions = []
+x = first_hole_from_edge
+
+while x <= outer_length - first_hole_from_edge + 0.0001:
+    hole_x_positions.append(round(x, 6))
+    x += hole_spacing
+
+if not hole_x_positions:
+    raise RuntimeError("No flange holes fit with these parameters.")
+
+# ============================================================
+# DOCUMENT AND BODY SETUP
+# ============================================================
+
+doc = App.ActiveDocument
+
+if doc is None:
+    doc = App.newDocument("Editable_Base_Flange_Box")
+
+old_body = doc.getObject(body_name)
+
+if old_body:
+    try:
+        doc.removeObject(old_body.Name)
+        doc.recompute()
+    except Exception:
+        pass
+
+body = doc.addObject("PartDesign::Body", body_name)
+doc.recompute()
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def xy_plane_of_body(body_obj):
+    """Return the body's XY datum plane."""
+    for feature in body_obj.Origin.OriginFeatures:
+        if feature.Name == "XY_Plane":
+            return feature
+
+    return body_obj.Origin.OriginFeatures[3]
+
+
+def attach_to_plane(sketch, plane):
+    """Attach a sketch to a datum plane across FreeCAD versions."""
+    sketch.MapMode = "FlatFace"
+
+    if hasattr(sketch, "AttachmentSupport"):
+        sketch.AttachmentSupport = [(plane, "")]
+    elif hasattr(sketch, "Support"):
+        sketch.Support = (plane, [""])
+    else:
+        raise RuntimeError(
+            "This FreeCAD version does not expose sketch support."
+        )
+
+
+def add_rectangle(sketch, x_min, y_min, x_max, y_max):
+    """Add an editable closed rectangle and return its line indices."""
+
+    p1 = App.Vector(x_min, y_min, 0)
+    p2 = App.Vector(x_max, y_min, 0)
+    p3 = App.Vector(x_max, y_max, 0)
+    p4 = App.Vector(x_min, y_max, 0)
+
+    line_1 = sketch.addGeometry(
+        Part.LineSegment(p1, p2), False
+    )
+    line_2 = sketch.addGeometry(
+        Part.LineSegment(p2, p3), False
+    )
+    line_3 = sketch.addGeometry(
+        Part.LineSegment(p3, p4), False
+    )
+    line_4 = sketch.addGeometry(
+        Part.LineSegment(p4, p1), False
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Coincident", line_1, 2, line_2, 1)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Coincident", line_2, 2, line_3, 1)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Coincident", line_3, 2, line_4, 1)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Coincident", line_4, 2, line_1, 1)
+    )
+
+    sketch.addConstraint(
+        Sketcher.Constraint("Horizontal", line_1)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Vertical", line_2)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Horizontal", line_3)
+    )
+    sketch.addConstraint(
+        Sketcher.Constraint("Vertical", line_4)
+    )
+
+    return [line_1, line_2, line_3, line_4]
+
+
+xy_plane = xy_plane_of_body(body)
+
+# ============================================================
+# BASE AND FLANGE SKETCH
+# ============================================================
+# The box base and outward flange are in one connected sketch,
+# so they are padded together at the bottom of the box.
+
+base_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Base_And_Flange_Sketch"
+)
+
+attach_to_plane(base_sketch, xy_plane)
+
+# Main box base
+base_lines = add_rectangle(
+    base_sketch,
+    0.0,
+    0.0,
+    outer_length,
+    outer_width
+)
+
+# Outward flange, connected along the long side
+flange_lines = add_rectangle(
+    base_sketch,
+    0.0,
+    flange_y_min,
+    outer_length,
+    flange_y_max
+)
+
+# Anchor the main base to the sketch origin.
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "Coincident",
+        base_lines[0], 1,
+        -1, 1
+    )
+)
+
+# Editable outer box dimensions
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceX",
+        base_lines[0], 1,
+        base_lines[0], 2,
+        outer_length
+    )
+)
+
+base_sketch.addConstraint(
+    Sketcher.Constraint(
+        "DistanceY",
+        base_lines[1], 1,
+        base_lines[1], 2,
+        outer_width
+    )
+)
+
+doc.recompute()
+
+# ============================================================
+# BASE PAD
+# ============================================================
+
+base_pad = body.newObject(
+    "PartDesign::Pad",
+    "Base_And_Flange_Pad"
+)
+
+base_pad.Profile = base_sketch
+base_pad.Length = base_thickness
+
+doc.recompute()
+
+# ============================================================
+# WALL SKETCH
+# ============================================================
+# Outer rectangle plus an inner opening produces four walls.
+# This sketch is offset to the top of the base.
+
+wall_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Wall_Sketch"
+)
+
+attach_to_plane(wall_sketch, xy_plane)
+
+wall_sketch.AttachmentOffset = App.Placement(
+    App.Vector(0, 0, base_thickness),
+    App.Rotation()
+)
+
+outer_wall_lines = add_rectangle(
+    wall_sketch,
+    0.0,
+    0.0,
+    outer_length,
+    outer_width
+)
+
+inner_wall_lines = add_rectangle(
+    wall_sketch,
+    wall_thickness,
+    wall_thickness,
+    wall_thickness + inner_length,
+    wall_thickness + inner_width
+)
+
+doc.recompute()
+
+# ============================================================
+# WALL PAD
+# ============================================================
+
+wall_pad = body.newObject(
+    "PartDesign::Pad",
+    "Wall_Pad"
+)
+
+wall_pad.Profile = wall_sketch
+wall_pad.Length = wall_height
+
+doc.recompute()
+
+# ============================================================
+# FLANGE HOLE SKETCH
+# ============================================================
+# The sketch lies on the XY plane at Z = 0. The pocket cuts
+# upward through the base-height flange.
+
+hole_sketch = body.newObject(
+    "Sketcher::SketchObject",
+    "Flange_Hole_Sketch"
+)
+
+attach_to_plane(hole_sketch, xy_plane)
+
+for hole_x in hole_x_positions:
+    circle_index = hole_sketch.addGeometry(
+        Part.Circle(
+            App.Vector(hole_x, hole_y, 0),
+            App.Vector(0, 0, 1),
+            hole_radius
+        ),
+        False
+    )
+
+    hole_sketch.addConstraint(
+        Sketcher.Constraint(
+            "Radius",
+            circle_index,
+            hole_radius
+        )
+    )
+
+    hole_sketch.addConstraint(
+        Sketcher.Constraint(
+            "DistanceX",
+            -1, 1,
+            circle_index, 3,
+            hole_x
+        )
+    )
+
+    hole_sketch.addConstraint(
+        Sketcher.Constraint(
+            "DistanceY",
+            -1, 1,
+            circle_index, 3,
+            hole_y
+        )
+    )
+
+doc.recompute()
+
+# ============================================================
+# FLANGE HOLE POCKET
+# ============================================================
+
+hole_pocket = body.newObject(
+    "PartDesign::Pocket",
+    "Flange_Hole_Pocket"
+)
+
+hole_pocket.Profile = hole_sketch
+hole_pocket.Length = base_thickness + 0.5
+hole_pocket.Reversed = False
+
+doc.recompute()
+
+# ============================================================
+# VIEW AND VISIBILITY
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except Exception:
+    pass
+
+try:
+    base_sketch.Visibility = False
+    base_pad.Visibility = False
+    wall_sketch.Visibility = False
+    wall_pad.Visibility = False
+    hole_sketch.Visibility = False
+
+    body.ViewObject.Visibility = True
+    hole_pocket.ViewObject.Visibility = True
+except Exception:
+    pass
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

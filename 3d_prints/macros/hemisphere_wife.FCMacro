@@ -1,0 +1,173 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+
+# ============================================================
+# EDITABLE PARAMETERS
+# ============================================================
+
+inner_radius = 6.5       # mm
+wall_thickness = 1.5      # mm
+
+object_name = "Editable_13mm_Inner_Radius_Hemisphere"
+
+# ============================================================
+# SHAPE BUILDER
+# ============================================================
+
+def make_hemisphere_shape(obj):
+    inner_r = float(obj.InnerRadius)
+    wall = float(obj.WallThickness)
+
+    if inner_r <= 0:
+        raise RuntimeError("InnerRadius must be > 0")
+
+    if wall <= 0:
+        raise RuntimeError("WallThickness must be > 0")
+
+    outer_r = inner_r + wall
+
+    big = outer_r * 4.0 + 20.0
+
+    # Outer sphere
+    outer_sphere = Part.makeSphere(
+        outer_r,
+        App.Vector(0, 0, 0)
+    )
+
+    # Cut away upper half, keeping lower hemisphere.
+    # Top opening is at z = 0.
+    upper_cut_box = Part.makeBox(
+        big,
+        big,
+        big,
+        App.Vector(-big / 2.0, -big / 2.0, 0)
+    )
+
+    outer_lower_hemisphere = outer_sphere.cut(upper_cut_box)
+
+    # Inner sphere cavity
+    inner_sphere = Part.makeSphere(
+        inner_r,
+        App.Vector(0, 0, 0)
+    )
+
+    shell = outer_lower_hemisphere.cut(inner_sphere)
+
+    try:
+        shell = shell.removeSplitter()
+    except Exception:
+        pass
+
+    return shell
+
+
+# ============================================================
+# PARAMETRIC FEATURE OBJECT
+# ============================================================
+
+class HemisphereProxy:
+    def execute(self, obj):
+        required = [
+            "InnerRadius",
+            "WallThickness",
+        ]
+
+        for prop in required:
+            if not hasattr(obj, prop):
+                return
+
+        obj.Shape = make_hemisphere_shape(obj)
+
+
+class ViewProviderHemisphere:
+    def __init__(self, view_obj):
+        view_obj.Proxy = self
+
+    def attach(self, view_obj):
+        self.ViewObject = view_obj
+
+    def getDisplayModes(self, view_obj):
+        return []
+
+    def getDefaultDisplayMode(self):
+        return "Shaded"
+
+    def setDisplayMode(self, mode):
+        return mode
+
+    def updateData(self, obj, prop):
+        pass
+
+    def onChanged(self, view_obj, prop):
+        pass
+
+
+# ============================================================
+# DOCUMENT SETUP
+# ============================================================
+
+doc = App.ActiveDocument
+if doc is None:
+    doc = App.newDocument("Hemisphere")
+
+old = doc.getObject(object_name)
+if old:
+    doc.removeObject(old.Name)
+    doc.recompute()
+
+obj = doc.addObject("Part::FeaturePython", object_name)
+
+# ============================================================
+# ADD EDITABLE PROPERTIES
+# ============================================================
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "InnerRadius",
+    "Hemisphere Parameters",
+    "Inner radius of the hemisphere in mm"
+)
+obj.InnerRadius = inner_radius
+
+obj.addProperty(
+    "App::PropertyFloat",
+    "WallThickness",
+    "Hemisphere Parameters",
+    "Wall thickness in mm"
+)
+obj.WallThickness = wall_thickness
+
+# Attach proxy after properties exist
+obj.Proxy = HemisphereProxy()
+
+if App.GuiUp:
+    ViewProviderHemisphere(obj.ViewObject)
+
+doc.recompute()
+
+# ============================================================
+# VIEW
+# ============================================================
+
+try:
+    Gui.ActiveDocument.resetEdit()
+except Exception:
+    pass
+
+try:
+    for thing in doc.Objects:
+        try:
+            thing.ViewObject.Visibility = False
+        except Exception:
+            pass
+
+    obj.ViewObject.Visibility = True
+    obj.ViewObject.DisplayMode = "Shaded"
+except Exception:
+    pass
+
+Gui.activeDocument().activeView().viewAxonometric()
+Gui.SendMsgToActiveView("ViewFit")
+
+doc.recompute()

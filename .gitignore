@@ -1,3 +1,36 @@
+# IDE and editor directories
+.claude/
+.vscode/
+.idea/
+*.code-workspace
+
+# PlatformIO build artifacts
+.pio/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Node / npm (if any frontend tooling is added)
+node_modules/
+
 # Prerequisites
 *.d
 
@@ -22,7 +55,6 @@
 *.dylib
 *.dll
 *.so.*
-
 
 # Fortran module files
 *.mod
