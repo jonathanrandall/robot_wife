@@ -54,7 +54,7 @@ from piper.voice import PiperVoice
 
 try:
     import rclpy
-    from std_msgs.msg import Int32
+    from std_msgs.msg import Int32, Bool
     from geometry_msgs.msg import Twist
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
     from builtin_interfaces.msg import Duration as DurationMsg
@@ -87,11 +87,12 @@ _ros_node    = None
 _hair_pub    = None
 _cmd_vel_pub = None   # geometry_msgs/Twist  -> /cmd_vel (autonomous channel)
 _head_pub    = None   # trajectory_msgs/JointTrajectory -> /pan_tilt_controller
+_follow_pub  = None   # std_msgs/Bool -> /jessica/finger_follow/enable (finger_follower node)
 
 # Head starting pose (rad). MUST match the launch file's home_head trajectory,
 # so the chatbot's relative "look" nudges begin from where the head really is.
-HEAD_HOME_PAN  = -0.5
-HEAD_HOME_TILT =  0.1
+HEAD_HOME_PAN  = 0.0
+HEAD_HOME_TILT = 0.0
 
 # Last commanded head pose (rad). Gestures build trajectories relative to this.
 _head_pan:  float = HEAD_HOME_PAN
@@ -214,13 +215,20 @@ You may only request one of these actions:
 - "shake_head"
 - "drive"
 - "turn"
+- "follow_finger"
 
 Action and parameter rules:
 - For "change_hair_color", use parameters like {"color": "blue"}.
 - For "look", use parameters like {"direction": "left"}, {"direction": "right"}, {"direction": "up"}, {"direction": "down"}, or {"direction": "center"}.
 - For "drive", use parameters like {"direction": "forward"} or {"direction": "backward"}.
 - For "turn", use parameters like {"direction": "left"} or {"direction": "right"}.
+- For "follow_finger", use parameters {"state": "on"} to start tracking or {"state": "off"} to stop.
 - For "wave", "nod", "shake_head", "stop", and "none", use parameters {}.
+
+Finger-following rules:
+- If Jonny says "Jessica darling" and asks you to follow his finger, watch his finger, track his finger, or keep your eyes on his finger, use action "follow_finger" with {"state": "on"}.
+- If he then says to stop following, stop watching, or look away, use action "follow_finger" with {"state": "off"}.
+- While following, only your head moves to keep his fingertip centred; you do not drive.
 
 Appearance command rules:
 - If Jonny says "Jessica darling" and asks to change your hair colour, hair color, lights, LEDs, glow, or appearance colour, use action "change_hair_color".
@@ -323,6 +331,32 @@ Assistant:
     "action": "wave",
     "parameters": {},
     "duration_s": 1.0
+  }
+}
+
+User: "Jessica darling, follow my finger."
+Assistant:
+{
+  "say": "Watching your finger now, love.",
+  "robot_command": {
+    "action": "follow_finger",
+    "parameters": {
+      "state": "on"
+    },
+    "duration_s": 0.0
+  }
+}
+
+User: "Jessica darling, stop following my finger."
+Assistant:
+{
+  "say": "Okay, I'll stop.",
+  "robot_command": {
+    "action": "follow_finger",
+    "parameters": {
+      "state": "off"
+    },
+    "duration_s": 0.0
   }
 }
 
@@ -544,7 +578,7 @@ def listen_for_speech(timeout: float | None = None) -> str | None:
 def sanitise_robot_command(command: dict) -> dict:
     allowed_actions = {
         "none", "stop", "change_hair_color",
-        "wave", "look", "nod", "shake_head", "drive", "turn",
+        "wave", "look", "nod", "shake_head", "drive", "turn", "follow_finger",
     }
 
     allowed_colors = {
@@ -606,6 +640,18 @@ def sanitise_robot_command(command: dict) -> dict:
             return {"action": "none", "parameters": {}, "duration_s": 0.0}
         parameters = {"direction": direction}
         duration_s = min(max(duration_s, 0.1), 1.0)
+
+    elif action == "follow_finger":
+        state = str(parameters.get("state", "on")).strip().lower()
+        # Accept a few natural synonyms for on/off.
+        if state in {"on", "start", "begin", "true", "enable", "yes"}:
+            state = "on"
+        elif state in {"off", "stop", "end", "false", "disable", "no"}:
+            state = "off"
+        else:
+            state = "on"
+        parameters = {"state": state}
+        duration_s = 0.0
 
     elif action in {"wave", "nod", "shake_head"}:
         parameters = {}
@@ -761,6 +807,20 @@ def drive_base(linear: float, angular: float, duration_s: float):
     _cmd_vel_pub.publish(Twist())  # full stop
 
 
+def _set_finger_follow(enable: bool):
+    """
+    Toggle the finger_follower node via /jessica/finger_follow/enable.
+    The chatbot only flips this flag; the real-time head-tracking loop lives in
+    the separate finger_follower node (never in this process).
+    """
+    if _follow_pub is None:
+        print(f"  (finger-follow publisher unavailable — would set enable={enable})")
+        return
+    msg = Bool()
+    msg.data = bool(enable)
+    _follow_pub.publish(msg)
+
+
 def do_look(direction: str, duration_s: float):
     # Relative nudge: each command moves the head one HEAD_STEP further in the
     # requested direction from where it currently is (clamped to the joint
@@ -831,6 +891,14 @@ def execute_robot_command(command: dict):
         print("Stopping the base.")
         if _cmd_vel_pub is not None:
             _cmd_vel_pub.publish(Twist())
+        # "Stop" halts everything, including finger following.
+        _set_finger_follow(False)
+        return
+
+    if action == "follow_finger":
+        on = parameters.get("state") == "on"
+        print(f"Finger following {'ON' if on else 'OFF'}.")
+        _set_finger_follow(on)
         return
 
     if action == "change_hair_color":
@@ -1028,7 +1096,7 @@ def is_correction(text: str) -> bool:
 
 
 def main():
-    global _ros_node, _hair_pub, _cmd_vel_pub, _head_pub
+    global _ros_node, _hair_pub, _cmd_vel_pub, _head_pub, _follow_pub
     global conversation, _mic_device_id, _actual_sample_rate, _actual_blocksize
 
     if ROS_AVAILABLE:
@@ -1038,7 +1106,9 @@ def main():
         _cmd_vel_pub = _ros_node.create_publisher(Twist, "/cmd_vel", 10)
         _head_pub    = _ros_node.create_publisher(
             JointTrajectory, "/pan_tilt_controller/joint_trajectory", 10)
-        print("ROS 2 publishers ready: /jessica/hair_hue, /cmd_vel, /pan_tilt_controller/joint_trajectory")
+        _follow_pub  = _ros_node.create_publisher(Bool, "/jessica/finger_follow/enable", 10)
+        print("ROS 2 publishers ready: /jessica/hair_hue, /cmd_vel, "
+              "/pan_tilt_controller/joint_trajectory, /jessica/finger_follow/enable")
         time.sleep(0.5)  # allow subscriber to connect before first publish
         msg = Int32()
         msg.data = COLOR_TO_HUE["pink"]

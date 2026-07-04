@@ -26,6 +26,7 @@ setup(
             'jessica_chatbot = jessica_robot.jessica_chatbot:main',
             'hair_led_node   = jessica_robot.hair_led_node:main',
             'pan_tilt_teleop = jessica_robot.pan_tilt_teleop:main',
+            'finger_follower = jessica_robot.finger_follower:main',
         ],
     },
 )

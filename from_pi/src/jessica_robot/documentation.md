@@ -485,11 +485,71 @@ Quick facts:
 - First-run TODO: `sudo apt install ros-jazzy-teleop-twist-joy` and a udev rule
   for `/dev/esp32_motor`.
 
+## Finger following (head tracking)
+
+`finger_follower` (`jessica_robot/finger_follower.py`, run with
+`ros2 run jessica_robot finger_follower`) makes the head track a raised index
+fingertip — hold a finger up in front of the camera, move it around, the head
+follows and keeps it centred. **Only the head moves.**
+
+**How it works.** The robot PC runs MediaPipe on the stereo camera stream and
+publishes `person_state_msgs/HandState` on `/jessica/hand_state`, containing the
+index fingertip's 3-D position in the camera optical frame (Z forward, X right,
+Y down, metres). The camera is mounted on the pan-tilt head, so this is a
+closed visual-servo loop:
+
+1. Pick the raised fingertip (whichever index tip is detected + `depth_valid`;
+   if both hands, the higher one).
+2. Back-project it to a pixel in the 320×240 eye image using the PC calibration
+   (`f=185.05, cx=170.0, cy=132.6`) and measure the error from the image centre
+   (160, 120): `pan_err = x_px-160` (+ve = finger to the right),
+   `tilt_err = y_px-120` (+ve = finger below centre).
+3. A 20 Hz proportional loop nudges the pan/tilt target to zero that error
+   (per-cycle step clamped, target clamped to the joint limits) and publishes a
+   short `JointTrajectory` to `/pan_tilt_controller/joint_trajectory`.
+4. Because the camera turns with the head, the error shrinks as the head moves,
+   so it converges on the fingertip. Finger lost for `lost_timeout` s → the head
+   holds position until it reappears.
+
+**Enable/disable.** Publish `std_msgs/Bool` on `/jessica/finger_follow/enable`
+so the chatbot (LLM) can switch the mode on/off by voice. The LLM only flips the
+flag — it is never in the control loop. `start_enabled` (param, default `true`)
+lets you run the node standalone for testing.
+
+**Prerequisites**
+- Hardware stack up (`jessica.launch.py`) so `pan_tilt_controller` consumes the
+  trajectory.
+- The PC publishing `/jessica/hand_state` (`stereo_pose_publisher` — see the
+  PC's own `documentation.md`, mirrored in `temp/from_pc/`).
+- `person_state_msgs` built on the Pi (it lives in `src/`; build with
+  `colcon build --packages-select person_state_msgs`). Requires **`empy==3.3.4`**
+  in the venv — MediaPipe/newer tooling pulls in empy 4.x which breaks the
+  rosidl CMake build with `TransientParseError`. Fix:
+  `~/venvs/jazzy/bin/pip install "empy==3.3.4"`.
+
+**Tuning** (all `ros2 param set /finger_follower <name> <val>`, or edit the
+`declare_parameter` defaults):
+
+| Param | Default | Effect |
+|---|---|---|
+| `pan_gain` / `tilt_gain` | `0.0015` | rad of head move per px of error. Higher = snappier but can oscillate. |
+| `pan_sign` / `tilt_sign` | `-1.0` | Flip if the head chases the finger the **wrong** way. |
+| `deadband_px` | `8.0` | Ignore errors smaller than this (kills jitter at centre). |
+| `max_step_rad` | `0.12` | Per-cycle clamp — caps head speed (~2.4 rad/s @20 Hz). |
+| `control_rate` | `20.0` | Command output rate (Hz). |
+| `lost_timeout` | `0.7` | Seconds without a fingertip before the head holds. |
+
+Directions were verified offline with a synthetic `HandState`: a fingertip to
+the right + below centre pans the head right and tilts it down (chasing the
+finger). If the real robot moves the wrong way, flip `pan_sign`/`tilt_sign`.
+
 ## Still future
 
-- **Cameras** — likely `image_transport` + a camera driver node
+- **Follow-me / point-and-navigate** — the PC also publishes
+  `/jessica/person_state` (shoulder midpoint, pointing ray). Same pattern:
+  a mode node the LLM enables. See `temp/from_pc/documentation.md` Tasks 1–2.
 - **Lidar** — standard ROS 2 lidar driver publishing `sensor_msgs/LaserScan`
 
 ---
 
-*Last updated: 2026-07-03*
+*Last updated: 2026-07-04*

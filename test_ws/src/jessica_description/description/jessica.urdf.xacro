@@ -21,6 +21,7 @@
   <xacro:include filename="frame.xacro"/>
   <xacro:include filename="wheels.xacro"/>
   <xacro:include filename="pan_tilt.xacro"/>
+  <xacro:include filename="stereo_camera.xacro"/>
 
   <xacro:if value="$(arg use_ros2_control)">
     <xacro:include filename="ros2_control.xacro"/>

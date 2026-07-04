@@ -59,8 +59,19 @@
   <xacro:property name="servo_width"  value="0.0197"/>
   <xacro:property name="servo_height" value="0.0429"/>
 
-  <!-- Standoff from the pan servo's output shaft to the tilt servo's output
-       shaft ("tilt attachment around 5cm tall"). -->
-  <xacro:property name="tilt_bracket_height" value="0.05"/>
+  <!-- Coupler between the pan servo's output and the tilt servo. -->
+  <xacro:property name="pan_tilt_spacer_height" value="0.01"/>
+
+  <!-- U-bracket the head sits on, straddling the tilt servo's rotation axis. -->
+  <xacro:property name="head_bracket_height"       value="0.05"/>
+  <xacro:property name="head_bracket_arm_spacing"   value="0.03"/>
+  <xacro:property name="head_bracket_arm_thickness" value="0.006"/>
+
+  <!-- Stereo camera on the head. camera_face_x/z are the head's front
+       surface and vertical mid-height (head_bottom+head_top combined bounding
+       box), relative to the head link's own origin - see stereo_camera.xacro. -->
+  <xacro:property name="camera_baseline" value="0.062"/>
+  <xacro:property name="camera_face_x"   value="0.051776"/>
+  <xacro:property name="camera_face_z"   value="0.113845"/>
 
 </robot>

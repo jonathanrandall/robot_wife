@@ -34,13 +34,13 @@
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <xacro:macro name="frame_mesh_part" params="mesh_name xyz rpy box_size">
+  <xacro:macro name="frame_mesh_part" params="mesh_name xyz rpy box_size material:=gray">
     <visual>
       <origin xyz="${xyz}" rpy="${rpy}"/>
       <geometry>
         <mesh filename="package://jessica_description/description/meshes/visual/${mesh_name}.stl" scale="0.001 0.001 0.001"/>
       </geometry>
-      <material name="gray"/>
+      <material name="${material}"/>
     </visual>
     <collision>
       <origin xyz="${xyz}" rpy="${rpy}"/>
@@ -100,6 +100,28 @@
       xyz="${body_x}  ${foot_track_y - 0.0215} ${grid_top_z}" rpy="${pi/2} 0 0"/>
     <xacro:frame_mesh_part mesh_name="body_432" box_size="${channel_cross} ${body_length} ${channel_cross}"
       xyz="${body_x} ${-foot_track_y - 0.0215} ${grid_top_z}" rpy="${pi/2} 0 0"/>
+
+    <!-- Front panel (wife_boobs_v2_13.stl) - a bowl shape; flat rim (the
+         mesh's flat reference plane) goes against the body, curved bottom
+         sticks out forward. rpy=(90,90,-90)deg (URDF fixed-axis roll/pitch/yaw)
+         puts the rotated bounding box at X in [0, 66.993], Y in [-76.9997,
+         66.9998], Z in [-52, 68.951] before translation - the rim lands
+         exactly at rotated X=0 with no correction needed, which is a good
+         sign this orientation (vs. the previous +90deg yaw) is the right one:
+           - top-aligned: rotated Z-max (68.951mm) placed at body_top_z
+           - right-aligned: rotated Y-min (-76.9997mm) placed at the right
+             body channel's outer face
+           - forward-touching: rotated X-min (0, the rim) placed at the
+             body's front face, bowl curving forward from there -->
+    <xacro:frame_mesh_part mesh_name="robot_front" material="white" box_size="0.121 0.144 0.067"
+      xyz="${body_x + channel_cross/2} ${-(foot_track_y + channel_cross/2) + 0.077000} ${body_top_z - 0.068951}" rpy="${pi/2} ${pi/2} ${-pi/2}"/>
+
+    <!-- Same part, mirrored to the left side. The rotated bounding box isn't
+         symmetric in Y (-76.9997 to 66.9998), so this isn't just the negative
+         of the right copy's Y - it's the *other* extreme (rotated Y-max)
+         placed at the left body channel's outer face. -->
+    <xacro:frame_mesh_part mesh_name="robot_front" material="white" box_size="0.121 0.144 0.067"
+      xyz="${body_x + channel_cross/2} ${foot_track_y + channel_cross/2 - 0.067000} ${body_top_z - 0.068951}" rpy="${pi/2} ${pi/2} ${-pi/2}"/>
 
   </link>
 
