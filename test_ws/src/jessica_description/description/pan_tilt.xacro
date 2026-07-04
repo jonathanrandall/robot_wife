@@ -1,0 +1,96 @@
+<?xml version="1.0"?>
+<!--
+  Pan-tilt head assembly: two MG996-form-factor servos, pan on the bottom,
+  tilt on top of a ~50mm standoff bracket, real head mesh
+  (eva_head_frontBottom-part.stl) mounted on the tilt output.
+
+  This replaces the old placeholder "mast" - the pan servo now sits on a
+  short 5mm neck riser on top of `body_top` (see frame.xacro), so the head
+  sits roughly 300mm lower than the old tall-mast placeholder did.
+
+  Head mesh: eva_head_frontBottom-part.stl's native origin looks like it's
+  already at the mounting/attachment point (X and Z are off-centre toward
+  one end, Y is exactly symmetric, consistent with a "front-bottom" mount
+  reference) - mounted here with no extra offset as a first guess. Check the
+  orientation/offset visually in RViz and tell me what to adjust.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="mg996_servo" params="xyz rpy">
+    <visual>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry><box size="${servo_length} ${servo_width} ${servo_height}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry><box size="${servo_length} ${servo_width} ${servo_height}"/></geometry>
+    </collision>
+  </xacro:macro>
+
+  <joint name="neck_joint" type="fixed">
+    <parent link="body_top"/>
+    <child  link="neck"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="neck">
+    <visual>
+      <origin xyz="0 0 ${neck_height/2}" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.015" length="${neck_height}"/></geometry>
+      <material name="gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${neck_height/2}" rpy="0 0 0"/>
+      <geometry><cylinder radius="0.015" length="${neck_height}"/></geometry>
+    </collision>
+  </link>
+
+  <joint name="pan_servo_joint" type="fixed">
+    <parent link="neck"/>
+    <child  link="pan_servo"/>
+    <origin xyz="0 0 ${neck_height}" rpy="0 0 0"/>
+  </joint>
+  <link name="pan_servo">
+    <!-- shaft (servo_height axis) points straight up -->
+    <xacro:mg996_servo xyz="0 0 ${servo_height/2}" rpy="0 0 0"/>
+  </link>
+
+  <!-- pan: yaw about Z -->
+  <joint name="pan_joint" type="revolute">
+    <parent link="pan_servo"/>
+    <child  link="tilt_mount"/>
+    <origin xyz="0 0 ${servo_height}" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.57" upper="1.57" effort="5.0" velocity="3.0"/>
+  </joint>
+  <link name="tilt_mount">
+    <visual>
+      <origin xyz="0 0 ${tilt_bracket_height/2}" rpy="0 0 0"/>
+      <geometry><box size="0.02 0.02 ${tilt_bracket_height}"/></geometry>
+      <material name="gray"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${tilt_bracket_height/2}" rpy="0 0 0"/>
+      <geometry><box size="0.02 0.02 ${tilt_bracket_height}"/></geometry>
+    </collision>
+    <!-- tilt servo mounted at the top of the bracket, shaft (servo_height axis) horizontal along Y -->
+    <xacro:mg996_servo xyz="0 0 ${tilt_bracket_height}" rpy="${pi/2} 0 0"/>
+  </link>
+
+  <!-- tilt: pitch about Y -->
+  <joint name="tilt_joint" type="revolute">
+    <parent link="tilt_mount"/>
+    <child  link="head"/>
+    <origin xyz="0 0 ${tilt_bracket_height}" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="0.87" effort="5.0" velocity="3.0"/>
+  </joint>
+  <link name="head">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry><mesh filename="package://jessica_description/description/meshes/visual/head_bottom.stl" scale="0.001 0.001 0.001"/></geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+</robot>

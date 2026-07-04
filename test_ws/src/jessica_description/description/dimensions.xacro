@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- ============ Real hardware dimensions (gobilda parts) ============ -->
+  <!-- gobilda 3601-0014-0120 wheel -->
+  <xacro:property name="wheel_radius" value="0.060"/>
+  <xacro:property name="wheel_width"  value="0.032"/>
+
+  <!-- gobilda 1120-series U-channel: every frame part below shares this
+       48x48mm cross-section, only the length differs. -->
+  <xacro:property name="channel_cross"    value="0.048"/>
+  <xacro:property name="foot_length"      value="0.360"/>  <!-- 1120-0014-0360 -->
+  <xacro:property name="cross_bar_length" value="0.144"/>  <!-- 1120-0005-0144 -->
+  <xacro:property name="leg_length"       value="0.528"/>  <!-- 1120-0021-0528 -->
+  <xacro:property name="body_length"      value="0.432"/>  <!-- 1120-0017-0432 -->
+
+  <!-- gobilda 1116-0088-0232 flat grid plate -->
+  <xacro:property name="grid_x"         value="0.088"/>   <!-- front-back depth -->
+  <xacro:property name="grid_y"         value="0.232"/>   <!-- spans between the legs -->
+  <xacro:property name="grid_thickness" value="0.0025"/>
+
+  <!-- ============ Assembly layout ============
+       Derived from the raw dimensions above plus a few placement choices
+       (see frame.xacro header comment for the full list of assumptions -
+       flag any of these that don't match the real build). -->
+  <xacro:property name="wheel_end_inset" value="0.024"/>  <!-- wheel axle inset from each end of a foot -->
+  <xacro:property name="wheel_side_gap"  value="0.020"/>  <!-- gap from the foot's outer face to the wheel's near edge -->
+  <xacro:property name="leg_from_back"   value="0.072"/>  <!-- leg centerline, measured from the back of the foot -->
+  <xacro:property name="cross_bar_from_front" value="0.144"/>  <!-- cross-bar centerline, measured from the front of the feet -->
+
+  <!-- Foot centerline (Y): assumes cross_bar_length is the clear span between
+       the two feet's facing inner surfaces. -->
+  <xacro:property name="foot_track_y" value="${cross_bar_length/2 + channel_cross/2}"/>
+
+  <xacro:property name="wheel_sep_x" value="${foot_length/2 - wheel_end_inset}"/>
+  <xacro:property name="wheel_sep_y" value="${foot_track_y + channel_cross/2 + wheel_side_gap + wheel_width/2}"/>
+
+  <xacro:property name="foot_z"     value="${wheel_radius}"/>            <!-- foot cross-section is vertically centred on the axle -->
+  <xacro:property name="foot_top_z" value="${foot_z + channel_cross/2}"/>
+
+  <xacro:property name="leg_x"     value="${-(foot_length/2) + leg_from_back}"/>
+  <xacro:property name="leg_top_z" value="${foot_top_z + leg_length}"/>
+
+  <xacro:property name="cross_bar_x" value="${foot_length/2 - cross_bar_from_front}"/>
+
+  <xacro:property name="grid_top_z" value="${leg_top_z + grid_thickness}"/>
+
+  <xacro:property name="body_x"     value="${leg_x}"/>
+  <xacro:property name="body_top_z" value="${grid_top_z + body_length}"/>
+
+  <!-- Short riser between the frame's body_top and the pan servo. -->
+  <xacro:property name="neck_height" value="0.005"/>
+
+  <!-- ============ Pan-tilt (MG996-form-factor servos) ============
+       Standard published MG996R body dimensions (L x W x H) - placeholder
+       boxes until we have a real STEP file for the servo/bracket, same as
+       the frame parts before their meshes arrived. -->
+  <xacro:property name="servo_length" value="0.0407"/>
+  <xacro:property name="servo_width"  value="0.0197"/>
+  <xacro:property name="servo_height" value="0.0429"/>
+
+  <!-- Standoff from the pan servo's output shaft to the tilt servo's output
+       shaft ("tilt attachment around 5cm tall"). -->
+  <xacro:property name="tilt_bracket_height" value="0.05"/>
+
+</robot>

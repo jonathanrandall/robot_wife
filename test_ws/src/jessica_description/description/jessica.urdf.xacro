@@ -1,0 +1,29 @@
+<?xml version="1.0"?>
+<!--
+  Top-level URDF for Jessica.
+  - 4-wheel differential drive base
+  - pan-tilt mechanism carrying Jessica's head
+  - ros2_control block driving the ESP32 hardware interface
+
+  Geometry/material/inertia definitions live in dimensions.xacro,
+  materials.xacro and inertial_macros.xacro; frame.xacro, wheels.xacro and
+  pan_tilt.xacro hold the link/joint definitions for each subassembly.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="jessica">
+
+  <xacro:arg name="use_ros2_control" default="true"/>
+  <xacro:arg name="sim_mode"          default="false"/>
+
+  <xacro:include filename="dimensions.xacro"/>
+  <xacro:include filename="materials.xacro"/>
+  <xacro:include filename="inertial_macros.xacro"/>
+
+  <xacro:include filename="frame.xacro"/>
+  <xacro:include filename="wheels.xacro"/>
+  <xacro:include filename="pan_tilt.xacro"/>
+
+  <xacro:if value="$(arg use_ros2_control)">
+    <xacro:include filename="ros2_control.xacro"/>
+  </xacro:if>
+
+</robot>

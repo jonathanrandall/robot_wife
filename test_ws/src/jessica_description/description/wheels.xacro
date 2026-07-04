@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!--
+  gobilda 3601-0014-0120 wheel (see meshes/step, meshes/visual). Collision
+  stays a plain cylinder primitive rather than the full tread mesh.
+
+  The mesh's native rotation axis is the STL's local Z; wheel_joint spins
+  about Y, so the visual is rotated -90 deg about X to line the two up, then
+  shifted 16mm (half the wheel width) so the mesh - whose native origin sits
+  at one face, not the centre - ends up centred on the joint like the
+  collision cylinder already is.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="wheel" params="name x y reflect">
+    <link name="${name}">
+      <visual>
+        <origin xyz="0 0.016 0" rpy="${-pi/2} 0 0"/>
+        <geometry><mesh filename="package://jessica_description/description/meshes/visual/wheel_120.stl" scale="0.001 0.001 0.001"/></geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
+        <geometry><cylinder length="${wheel_width}" radius="${wheel_radius}"/></geometry>
+      </collision>
+    </link>
+    <joint name="${name}_joint" type="continuous">
+      <parent link="base_link"/>
+      <child  link="${name}"/>
+      <origin xyz="${x} ${y} ${wheel_radius}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel name="left_front_wheel"  x="${ wheel_sep_x}" y="${ wheel_sep_y}" reflect="1"/>
+  <xacro:wheel name="left_rear_wheel"   x="${-wheel_sep_x}" y="${ wheel_sep_y}" reflect="1"/>
+  <xacro:wheel name="right_front_wheel" x="${ wheel_sep_x}" y="${-wheel_sep_y}" reflect="-1"/>
+  <xacro:wheel name="right_rear_wheel"  x="${-wheel_sep_x}" y="${-wheel_sep_y}" reflect="-1"/>
+
+</robot>
