@@ -8,8 +8,10 @@ import sys
 sys.path.insert(0, '/home/jonny/venvs/jazzy/lib/python3.12/site-packages')
 
 import ctypes
+import datetime
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -86,9 +88,14 @@ _hair_pub    = None
 _cmd_vel_pub = None   # geometry_msgs/Twist  -> /cmd_vel (autonomous channel)
 _head_pub    = None   # trajectory_msgs/JointTrajectory -> /pan_tilt_controller
 
+# Head starting pose (rad). MUST match the launch file's home_head trajectory,
+# so the chatbot's relative "look" nudges begin from where the head really is.
+HEAD_HOME_PAN  = -0.5
+HEAD_HOME_TILT =  0.1
+
 # Last commanded head pose (rad). Gestures build trajectories relative to this.
-_head_pan:  float = 0.0
-_head_tilt: float = 0.0
+_head_pan:  float = HEAD_HOME_PAN
+_head_tilt: float = HEAD_HOME_TILT
 
 # Motion tuning — kept gentle (the system prompt forbids fast movement).
 DRIVE_SPEED   = 0.15   # m/s
@@ -96,6 +103,7 @@ TURN_SPEED    = 0.6    # rad/s
 HEAD_PAN_MAX  = 1.4    # rad, soft clamp
 HEAD_TILT_UP  = 0.8    # rad (positive = up)
 HEAD_TILT_DN  = -1.4   # rad (negative = down)
+HEAD_STEP     = 0.4    # rad per "look" command (relative nudge, clamped to limits)
 
 
 # ---------------------------------------------------------------------
@@ -431,41 +439,67 @@ def record_speech(timeout: float | None = None) -> bytes | None:
     block_s         = _actual_blocksize / _actual_sample_rate
     silence_needed  = int(PAUSE_THRESHOLD / block_s)
 
-    with sd.InputStream(
-        samplerate=_actual_sample_rate,
-        channels=1,
-        dtype='int16',
-        device=_mic_device_id,
-        blocksize=_actual_blocksize,
-        callback=_cb,
-    ):
-        while True:
-            try:
-                block = q.get(timeout=2.0)
-            except queue.Empty:
-                print("Warning: mic stream stalled.")
-                return None
+    # The capture stream can be slow to deliver its FIRST block — e.g. right
+    # after playback, or when opened/closed in quick succession (as DORMANT
+    # does). Give the first block a generous warm-up window (silently); once
+    # audio is flowing, use a tight timeout to catch a genuine mid-stream stall.
+    # If even the warm-up window elapses, reopen a few times before giving up,
+    # so a transient failure never silently drops a command.
+    WARMUP_TIMEOUT    = 6.0   # s — grace for the first block after opening
+    ACTIVE_TIMEOUT    = 2.0   # s — once blocks are flowing
+    MAX_STALL_RETRIES = 3
+    stalls = 0
 
-            elapsed += block_s
-            energy   = float(np.abs(block).mean())
-
-            if not speech_started:
-                if timeout is not None and elapsed > timeout:
-                    return None
-                if energy > _speech_threshold:
-                    speech_started = True
-                    chunks = [block]
-                    silence_blocks = 0
-            else:
-                chunks.append(block)
-                if energy < _speech_threshold:
-                    silence_blocks += 1
-                    if silence_blocks >= silence_needed:
-                        break
-                else:
-                    silence_blocks = 0
-                if elapsed > MAX_PHRASE_SECONDS:
+    while True:
+        with sd.InputStream(
+            samplerate=_actual_sample_rate,
+            channels=1,
+            dtype='int16',
+            device=_mic_device_id,
+            blocksize=_actual_blocksize,
+            callback=_cb,
+        ):
+            reopen    = False
+            got_first = False
+            while True:
+                try:
+                    block = q.get(timeout=ACTIVE_TIMEOUT if got_first else WARMUP_TIMEOUT)
+                except queue.Empty:
+                    # Mid-phrase or out of retries → genuine failure.
+                    if speech_started or stalls >= MAX_STALL_RETRIES:
+                        print("Warning: mic stream stalled.")
+                        return None
+                    # Stream never started delivering — reopen and try again
+                    # (quietly; the warm-up window already gave it plenty of time).
+                    stalls += 1
+                    reopen = True
                     break
+
+                got_first = True
+                stalls = 0
+                elapsed += block_s
+                energy   = float(np.abs(block).mean())
+
+                if not speech_started:
+                    if timeout is not None and elapsed > timeout:
+                        return None
+                    if energy > _speech_threshold:
+                        speech_started = True
+                        chunks = [block]
+                        silence_blocks = 0
+                else:
+                    chunks.append(block)
+                    if energy < _speech_threshold:
+                        silence_blocks += 1
+                        if silence_blocks >= silence_needed:
+                            return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
+                    else:
+                        silence_blocks = 0
+                    if elapsed > MAX_PHRASE_SECONDS:
+                        return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
+
+        if not reopen:
+            break
 
     return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
 
@@ -630,7 +664,8 @@ def ask_ollama(user_text: str) -> dict:
     if len(conversation) > 12:
         conversation = conversation[-12:]
 
-    return clean_reply
+    # Include the raw model output for logging; kept out of `conversation` above.
+    return {**clean_reply, "llm_raw": raw_text}
 
 
 _piper_voice: PiperVoice | None = None
@@ -727,17 +762,21 @@ def drive_base(linear: float, angular: float, duration_s: float):
 
 
 def do_look(direction: str, duration_s: float):
+    # Relative nudge: each command moves the head one HEAD_STEP further in the
+    # requested direction from where it currently is (clamped to the joint
+    # limits), rather than snapping to an extreme. Ask again to keep going.
+    # "center" is the exception — it re-homes to 0, 0.
     pan, tilt = _head_pan, _head_tilt
-    if direction in ("left",):
-        pan = HEAD_PAN_MAX
-    elif direction in ("right",):
-        pan = -HEAD_PAN_MAX
+    if direction == "left":
+        pan = _clamp(pan + HEAD_STEP, -HEAD_PAN_MAX, HEAD_PAN_MAX)
+    elif direction == "right":
+        pan = _clamp(pan - HEAD_STEP, -HEAD_PAN_MAX, HEAD_PAN_MAX)
     elif direction == "up":
-        tilt = HEAD_TILT_UP
+        tilt = _clamp(tilt + HEAD_STEP, HEAD_TILT_DN, HEAD_TILT_UP)
     elif direction == "down":
-        tilt = HEAD_TILT_DN
+        tilt = _clamp(tilt - HEAD_STEP, HEAD_TILT_DN, HEAD_TILT_UP)
     elif direction in ("center", "centre"):
-        pan, tilt = 0.0, 0.0
+        pan, tilt = HEAD_HOME_PAN, HEAD_HOME_TILT
     move_t = max(duration_s, 0.6)
     publish_head_trajectory([(pan, tilt, move_t)])
 
@@ -849,12 +888,93 @@ def speak(text: str, wav_path: Path):
     play_wav(wav_path)
 
 
-def process_turn(user_text: str, mp3_path: Path):
-    """Run one full conversation turn: Ollama → execute → speak."""
+# ---------------------------------------------------------------------
+# Conversation logging ("dreaming") — one JSONL line per turn so the prompts
+# and command-handling can be reviewed/refined offline, and used to teach
+# Jessica. Best-effort: a logging failure must never break the conversation.
+# ---------------------------------------------------------------------
+
+LOG_DIR = Path.home() / "jessica_ws" / "logs"
+
+# Reference to the most recently logged turn, so spoken feedback ("that was
+# wrong…" / "good girl") can be attached to it for later prompt-tuning/teaching.
+_last_turn: dict | None = None
+
+
+def _write_log(entry: dict):
+    """Append one JSON object to today's log file."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"jessica_{datetime.datetime.now():%Y-%m-%d}.jsonl"
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def log_turn(heard: str, llm_raw: str, reply_spoken: str,
+             command: dict, trigger: str):
+    """Append one conversation turn to today's JSONL log."""
+    global _last_turn
+    try:
+        now = datetime.datetime.now()
+        action = command.get("action")
+        params = command.get("parameters", {})
+        turn_id = now.strftime("%Y%m%dT%H%M%S%f")
+        _write_log({
+            "id":           turn_id,
+            "type":         "turn",
+            "ts":           now.isoformat(timespec="seconds"),
+            "trigger":      trigger,                       # idle | conversation | wake
+            "heard":        heard,                         # Whisper transcript
+            "llm_raw":      llm_raw,                        # raw Ollama output (pre-parse)
+            "reply_spoken": reply_spoken,                   # what she actually said
+            "action":       action,                         # parsed robot action
+            "params":       params,                         # parsed parameters
+            "executed":     action not in (None, "", "none"),
+        })
+        _last_turn = {"id": turn_id, "heard": heard,
+                      "action": action, "params": params}
+    except Exception as e:                                  # never break the turn
+        print(f"(log_turn failed: {e})")
+
+
+def log_feedback(label: str, note: str) -> bool:
+    """Attach spoken feedback to the most recent turn (label = good | bad).
+    The entry is self-contained (carries the original input + output) so it can
+    become a training pair without joining files. Returns False if there's no
+    turn to attach to yet."""
+    if _last_turn is None:
+        return False
+    try:
+        now = datetime.datetime.now()
+        _write_log({
+            "id":          now.strftime("%Y%m%dT%H%M%S%f"),
+            "type":        "feedback",
+            "ts":          now.isoformat(timespec="seconds"),
+            "ref":         _last_turn["id"],       # the turn being judged
+            "label":       label,                   # good | bad
+            "note":        note,                    # your words, verbatim
+            "orig_heard":  _last_turn["heard"],     # what you'd said that turn
+            "orig_action": _last_turn["action"],    # what she did (maybe wrong)
+            "orig_params": _last_turn["params"],
+        })
+        return True
+    except Exception as e:
+        print(f"(log_feedback failed: {e})")
+        return False
+
+
+def process_turn(user_text: str, mp3_path: Path, trigger: str = "conversation"):
+    """Run one full conversation turn: Ollama → execute → speak → log."""
     reply = ask_ollama(user_text)
-    reply["robot_command"] = sanitise_robot_command(reply["robot_command"])
-    execute_robot_command(reply["robot_command"])
+    command = sanitise_robot_command(reply["robot_command"])
+    execute_robot_command(command)
     speak(reply["say"], mp3_path)
+    log_turn(
+        heard=user_text,
+        llm_raw=reply.get("llm_raw", ""),
+        reply_spoken=reply["say"],
+        command=command,
+        trigger=trigger,
+    )
 
 
 # ---------------------------------------------------------------------
@@ -869,10 +989,42 @@ DORMANT      = "dormant"   # muted after "bye jessica": listening but silent unt
 # robot-command trigger, so waking with it lets a command run in the same breath.
 WAKE_PHRASES = ("jessica darling", "hello jessica", "hi jessica")
 
+# Phrases that mute Jessica into DORMANT.
+FAREWELL_PHRASES = ("bye jessica", "goodbye jessica")
+
+# Spoken feedback on the PREVIOUS turn, logged for the "dreaming"/teaching set.
+# Keep these fairly specific so normal chat doesn't trip them. Tune to taste.
+APPROVAL_PHRASES   = ("good girl", "well done", "good job",
+                      "that was perfect", "perfect jessica", "that was great")
+CORRECTION_PHRASES = ("that was wrong", "that is wrong", "that's wrong",
+                      "wrong jessica", "you got it wrong", "you got that wrong",
+                      "that was not right", "that wasn't right")
+
+
+def _normalise(text: str) -> str:
+    """Lowercase and collapse punctuation/whitespace to single spaces, so that
+    Whisper's punctuation ('Bye, Jessica.') doesn't break phrase matching."""
+    return re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
 
 def is_wake_phrase(text: str) -> bool:
-    t = text.lower()
+    t = _normalise(text)
     return any(p in t for p in WAKE_PHRASES)
+
+
+def is_farewell(text: str) -> bool:
+    t = _normalise(text)
+    return any(p in t for p in FAREWELL_PHRASES)
+
+
+def is_approval(text: str) -> bool:
+    t = _normalise(text)
+    return any(p in t for p in APPROVAL_PHRASES)
+
+
+def is_correction(text: str) -> bool:
+    t = _normalise(text)
+    return any(p in t for p in CORRECTION_PHRASES)
 
 
 def main():
@@ -925,7 +1077,7 @@ def main():
 
                     state        = CONVERSATION
                     conversation = []
-                    process_turn(text, mp3_path)
+                    process_turn(text, mp3_path, trigger="idle")
 
                 elif state == CONVERSATION:
                     print(f"[CONVERSATION] Listening (timeout {CONVERSATION_TIMEOUT}s)...")
@@ -941,11 +1093,28 @@ def main():
                         speak("Sorry sweetheart, I didn't catch that.", mp3_path)
                         continue
 
-                    if "bye jessica" in text.lower() or "goodbye jessica" in text.lower():
+                    if is_farewell(text):
                         speak("Bye for now, love. Talk soon.", mp3_path)
                         print("\n[DORMANT] Muted — say a wake phrase "
                               "(e.g. 'Jessica darling') to resume.")
                         state = DORMANT
+                        continue
+
+                    # Spoken feedback on the previous turn — logged, not answered.
+                    if is_approval(text):
+                        if log_feedback("good", text):
+                            print("[FEEDBACK] logged 👍")
+                            speak("Thank you, love. I'll remember that.", mp3_path)
+                        else:
+                            speak("Thank you, love.", mp3_path)
+                        continue
+
+                    if is_correction(text):
+                        if log_feedback("bad", text):
+                            print("[FEEDBACK] logged 👎 (correction)")
+                            speak("Sorry love. I've noted that so I can do better.", mp3_path)
+                        else:
+                            speak("Sorry love, I'm not sure which bit you mean.", mp3_path)
                         continue
 
                     process_turn(text, mp3_path)
@@ -959,7 +1128,7 @@ def main():
 
                     state        = CONVERSATION
                     conversation = []
-                    process_turn(text, mp3_path)
+                    process_turn(text, mp3_path, trigger="wake")
 
         except KeyboardInterrupt:
             print("\nShutting down.")

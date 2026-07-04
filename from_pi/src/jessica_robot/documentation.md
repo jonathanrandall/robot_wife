@@ -192,6 +192,28 @@ spoken while waking executes immediately.
 > wakes on **any** speech. Only an explicit "bye jessica" triggers the muted
 > `DORMANT` state. A future Porcupine wake word will replace this manual scheme.
 
+Phrase matching is punctuation-proof: `is_farewell()` / `is_wake_phrase()` both
+run the transcript through `_normalise()` (lowercase + collapse punctuation to
+spaces), so Whisper output like `"Goodbye, Jessica."` still matches.
+
+#### Troubleshooting: "the DORMANT / goodbye feature stopped working"
+
+Almost always a **stale duplicate chatbot process**, not a code bug. `ros2 launch`
+Ctrl-C doesn't always reap its children, so a previous `jessica_chatbot` can keep
+running — competing for the microphone and, if it started before the latest
+build, executing **old code**. That old instance won't have the current matching
+logic, so goodbyes appear to be ignored.
+
+Check and clear before relaunching:
+
+```bash
+pgrep -af jessica_chatbot   # should be empty before launch, exactly ONE while running
+pkill -f jessica_chatbot    # kill any leftover instance
+```
+
+Rule of thumb: if any chatbot feature seems to "regress," check for duplicate
+processes **first**.
+
 ### Key settings
 
 | Constant | Default | Purpose |
@@ -210,6 +232,133 @@ at the start of the request, e.g.:
 - *"Jessica darling, turn left."*
 
 Without "Jessica darling", she treats the message as conversation only.
+
+---
+
+## Conversation Logging & Feedback ("Dreaming")
+
+Every conversation turn is logged to a per-day JSONL file so the prompts and
+command-handling can be reviewed and refined offline, and so good/bad examples
+can be collected to teach Jessica.
+
+**Location:** `~/jessica_ws/logs/jessica_YYYY-MM-DD.jsonl` (auto-created).
+**Best-effort:** all logging is wrapped in try/except — a logging failure can
+never break a conversation.
+
+### `turn` entries
+
+One per conversation turn, written at the end of `process_turn()`:
+
+```json
+{"id":"20260703T104725591368","type":"turn","ts":"2026-07-03T10:47:25",
+ "trigger":"conversation","heard":"Jessica darling, turn left",
+ "llm_raw":"{\"say\":\"Of course love\",\"robot_command\":{...}}",
+ "reply_spoken":"Of course love","action":"turn",
+ "params":{"direction":"left"},"executed":true}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `id` | Unique turn id (used by feedback to reference it) |
+| `trigger` | `idle` (first contact), `conversation`, or `wake` (from DORMANT) |
+| `heard` | Whisper transcript of what Jonny said |
+| `llm_raw` | Raw Ollama output **before** parsing (kept out of the prompt context) |
+| `reply_spoken` | What Jessica actually said |
+| `action` / `params` | The parsed robot command |
+| `executed` | `true` unless the action was `none` |
+
+### `feedback` entries — spoken correction / approval
+
+Right after Jessica acts, Jonny can grade the previous turn out loud. The
+feedback is **logged, acknowledged, and not run as a normal turn**:
+
+- **Approve (👍):** "good girl", "well done", "good job", "that was perfect",
+  "perfect jessica", "that was great" → logs `label: good`.
+- **Correct (👎):** "that was wrong", "that's wrong", "wrong jessica",
+  "you got it wrong", "that wasn't right" → logs `label: bad`, with the spoken
+  words kept verbatim as `note` (e.g. *"…you should have turned right"*).
+
+The phrase lists live in `APPROVAL_PHRASES` / `CORRECTION_PHRASES` in
+`jessica_chatbot.py` — tune them to taste. Matching is punctuation-proof via
+`_normalise()`, same as the wake/farewell phrases.
+
+Each feedback entry is **self-contained** (carries the original input + output),
+so it can become a training pair without joining files:
+
+```json
+{"id":"...","type":"feedback","ts":"...","ref":"20260703T104725591368",
+ "label":"bad","note":"No, that was wrong, you should have looked right.",
+ "orig_heard":"Jessica darling, look left",
+ "orig_action":"look","orig_params":{"direction":"left"}}
+```
+
+`ref` points at the `id` of the turn being judged.
+
+### Using the logs to improve Jessica
+
+1. **Prompt refinement / few-shot (start here):** read the log, find `bad`
+   feedback (or turns with wrong `action`/`params`), and fold the corrected
+   input→output pairs into `SYSTEM_PROMPT` as few-shot examples. Biggest win for
+   a small model, no weight training needed.
+2. **Fine-tuning (later, optional):** the `feedback` entries are the seed of a
+   real dataset — `bad` + `note` gives a correction pair, `good` marks confirmed
+   examples. Curate a few hundred, then QLoRA (unsloth/axolotl) → GGUF → Ollama.
+
+> Note: plain `turn` logging alone records what she *did* say, not what she
+> *should* have — the `feedback` layer is what makes the logs trainable.
+
+### Turning feedback into examples — `build_examples.py`
+
+A small helper (`src/jessica_robot/tools/build_examples.py`, plain Python, no ROS
+deps) scans the logs, pairs each `feedback` entry with the `turn` it graded (via
+`ref` → `id`), and produces a clean examples file:
+
+- **`good` feedback** → a confirmed `input → command` example, ready for few-shot.
+- **`bad` feedback** → a correction to review: the input, what she did, and your
+  spoken note, with a blank `corrected_command` for you to fill in.
+
+```bash
+cd ~/jessica_ws
+
+# Write ~/jessica_ws/logs/examples.jsonl (good + bad):
+python3 src/jessica_robot/tools/build_examples.py
+
+# Print the confirmed (good) ones as ready-to-paste few-shot text:
+python3 src/jessica_robot/tools/build_examples.py --prompt
+
+# Only the corrections to review:
+python3 src/jessica_robot/tools/build_examples.py --label bad
+
+# Only logs on/after a date:
+python3 src/jessica_robot/tools/build_examples.py --since 2026-07-01
+```
+
+Options: `--logs-dir DIR`, `--out FILE`, `--since YYYY-MM-DD`,
+`--label good|bad|all`, `--prompt`.
+
+Output line (JSONL mode):
+
+```json
+{"label":"good","input":"Jessica darling, tilt down",
+ "model_command":{"action":"look","parameters":{"direction":"down"}},
+ "model_say":"Tilting down now.","note":"Good girl, Jessica!",
+ "command":{"action":"look","parameters":{"direction":"down"}}}
+```
+
+Recommended workflow:
+1. Run with `--prompt`, paste the confirmed **good** examples into
+   `SYSTEM_PROMPT` as few-shot (the quickest way to improve her).
+2. Run with `--label bad`, work through each correction, fill in the
+   `corrected_command`, and add those as few-shot examples too.
+3. Keep the accumulated JSONL — it's the seed of a fine-tuning dataset later.
+
+### Quick review
+
+```bash
+cat ~/jessica_ws/logs/jessica_$(date +%F).jsonl                 # today's log
+# just the corrections:
+grep '"label":"bad"' ~/jessica_ws/logs/jessica_$(date +%F).jsonl
+```
 
 ---
 
@@ -343,4 +492,4 @@ Quick facts:
 
 ---
 
-*Last updated: 2026-06-28*
+*Last updated: 2026-07-03*

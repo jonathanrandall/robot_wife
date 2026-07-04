@@ -1,6 +1,6 @@
 controller_manager:
   ros__parameters:
-    update_rate: 50  # Hz
+    update_rate: 30  # Hz (33ms budget; serial GET/STATE round-trip must fit inside this)
 
     diff_cont:
       type: diff_drive_controller/DiffDriveController
@@ -20,7 +20,7 @@ diff_cont:
     wheel_separation: 0.26   # metres (centre-to-centre, left↔right)
     wheel_radius:     0.072  # metres
 
-    publish_rate: 50.0
+    publish_rate: 30.0
     odom_frame_id: odom
     base_frame_id: base_link
     pose_covariance_diagonal:  [0.001, 0.001, 0.001, 0.001, 0.001, 0.01]

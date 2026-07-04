@@ -18,7 +18,7 @@ struct PanTiltConfig {
     // Angle limits in radians
     float    panMinRad   = -1.5708f;   // -π/2
     float    panMaxRad   =  1.5708f;   // +π/2
-    float    tiltMinRad  = -0.7854f;   // -π/4
+    float    tiltMinRad  = -1.5708f;   // -π/4
     float    tiltMaxRad   =  1.5708f;  // +π/2
 };
 

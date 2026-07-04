@@ -131,7 +131,8 @@
         <plugin>esp32_combined_hardware/ESP32CombinedHardware</plugin>
         <param name="device">/dev/esp32_motor</param>
         <param name="baud_rate">115200</param>
-        <param name="timeout_ms">1000</param>
+        <param name="timeout_ms">25</param>   <!-- MUST be < loop period (33ms@30Hz). ReadLine blocks the RT loop up to this long when the ESP32 doesn't reply. -->
+
         <param name="wheel_radius">7.2</param>        <!-- cm, used by hardware protocol -->
         <param name="enc_counts_per_rev">1425</param>
       </hardware>

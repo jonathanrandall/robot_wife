@@ -1,5 +1,6 @@
 # IDE and editor directories
 .claude/
+claude_next_time
 .vscode/
 .idea/
 *.code-workspace

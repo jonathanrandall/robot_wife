@@ -5,14 +5,16 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessStart
+from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch.substitutions import Command, LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 # ---------------------------------------------------------------------------
@@ -49,8 +51,11 @@ def generate_launch_description():
     joy_buttons_yaml = os.path.join(pkg, "config", "joy_button_mappings.yaml")
 
     robot_description = {
-        "robot_description": Command(
-            ["xacro ", xacro_file, " use_ros2_control:=true sim_mode:=false"]
+        "robot_description": ParameterValue(
+            Command(
+                ["xacro ", xacro_file, " use_ros2_control:=true sim_mode:=false"]
+            ),
+            value_type=str,
         )
     }
 
@@ -80,17 +85,44 @@ def generate_launch_description():
             output="screen",
         )
 
+    # One spawner instance per controller, chained below so they run strictly
+    # one-after-another. Firing them all at once makes the spawners fight over
+    # the controller_manager service lock and one silently loses (that was why
+    # joint_broad never activated).
+    joint_broad_spawner = spawner("joint_broad")
+    diff_cont_spawner   = spawner("diff_cont")
+    pan_tilt_spawner    = spawner("pan_tilt_controller")
+
+    # Once pan_tilt_controller is active, drive the head to its home pose over
+    # 2 s so Jessica always starts from a known, centred position.
+    # NOTE: these values MUST match HEAD_HOME_PAN/HEAD_HOME_TILT in jessica_chatbot.py.
+    home_head = ExecuteProcess(
+        cmd=[
+            "ros2", "topic", "pub", "--once",
+            "/pan_tilt_controller/joint_trajectory",
+            "trajectory_msgs/msg/JointTrajectory",
+            '{joint_names: ["pan_joint", "tilt_joint"], '
+            'points: [{positions: [-0.5, 0.1], time_from_start: {sec: 2}}]}',
+        ],
+        output="screen",
+    )
+
+    # controller_manager up → joint_broad → diff_cont → pan_tilt → home the head.
     spawn_joint_broad = RegisterEventHandler(
         OnProcessStart(target_action=controller_manager,
-                       on_start=[spawner("joint_broad")])
+                       on_start=[joint_broad_spawner])
     )
     spawn_diff_cont = RegisterEventHandler(
-        OnProcessStart(target_action=controller_manager,
-                       on_start=[spawner("diff_cont")])
+        OnProcessExit(target_action=joint_broad_spawner,
+                      on_exit=[diff_cont_spawner])
     )
     spawn_pan_tilt = RegisterEventHandler(
-        OnProcessStart(target_action=controller_manager,
-                       on_start=[spawner("pan_tilt_controller")])
+        OnProcessExit(target_action=diff_cont_spawner,
+                      on_exit=[pan_tilt_spawner])
+    )
+    home_head_on_start = RegisterEventHandler(
+        OnProcessExit(target_action=pan_tilt_spawner,
+                      on_exit=[home_head])
     )
 
     # ── Joystick: driving + head + button bridge ────────────────────────────
@@ -140,6 +172,7 @@ def generate_launch_description():
             spawn_joint_broad,
             spawn_diff_cont,
             spawn_pan_tilt,
+            home_head_on_start,
             joy_node,
             teleop_drive,
             pan_tilt_teleop,
