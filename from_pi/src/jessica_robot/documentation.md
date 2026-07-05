@@ -85,7 +85,15 @@ ros2 launch jessica_robot jessica.launch.py
 # Use this when the robot hardware is NOT connected (the full launch above will
 # spam errors without the ESP32, a joystick, and ros-jazzy-teleop-twist-joy).
 ros2 launch jessica_robot jessica.launch.py hardware:=false
+
+# Skip the USB stereo camera publisher (e.g. camera unplugged):
+ros2 launch jessica_robot jessica.launch.py camera:=false
 ```
+
+The `camera` launch argument (default `true`) starts the `webcam_publisher`,
+which feeds `/jessica/camera/image/compressed` to the PC vision node. It's a
+separate USB device from the ESP32, so it's gated independently of `hardware` —
+you can run the camera with `hardware:=false`, or skip it with `camera:=false`.
 
 > The `hardware` launch argument defaults to `true`. Set `hardware:=false` to run
 > only `jessica_chatbot` + `hair_led_node`, exactly like before the motion stack
@@ -464,6 +472,32 @@ make_node("jessica_chatbot"),
 
 ---
 
+## Audio capture (mic) — IMPLEMENTED
+
+The mic is captured with an **`arecord` subprocess**, not `sounddevice`/PortAudio.
+`record_speech()` spawns `arecord -D plughw:CARD=Device,DEV=0 -f S16_LE -c1 -t raw`
+and reads 50 ms blocks off its stdout pipe, doing the same energy-based
+silence detection (`PAUSE_THRESHOLD`, `MAX_PHRASE_SECONDS`) on the stream.
+`calibrate_mic()` captures the same way.
+
+**Why not sounddevice:** on this Pi under load (camera + vision + finger_follower
++ Piper TTS all running), the PortAudio capture callback got starved right after
+playback and the stream stalled ("mic stream stalled"), plus intermittent input
+overflows and transient "invalid sample rate" open failures. `arecord` is a
+dedicated process, so a briefly starved main thread just leaves audio **buffered
+in the pipe** instead of xrunning the capture — no stalls. Playback already uses
+the same pattern (`aplay`), and `plughw` absorbs any 44100↔48000 rate mismatch.
+
+Side benefit: because the old path dropped samples on overflow, transcription
+quality effectively improves with clean, continuous audio (compounding the PC's
+move to the larger `medium.en` Whisper model).
+
+- Mic tuning: `ENERGY_MARGIN` / the calibrated `_speech_threshold` set the
+  speech-vs-silence cutoff. Lower if it misses you; raise if it triggers on
+  background noise. `PAUSE_THRESHOLD` is the silence gap that ends a phrase.
+
+---
+
 ## Motion & Head Control (ros2_control)  — IMPLEMENTED
 
 Jessica's drive base and pan-tilt head are driven by `ros2_control` on an ESP32
@@ -511,10 +545,28 @@ closed visual-servo loop:
    so it converges on the fingertip. Finger lost for `lost_timeout` s → the head
    holds position until it reappears.
 
-**Enable/disable.** Publish `std_msgs/Bool` on `/jessica/finger_follow/enable`
-so the chatbot (LLM) can switch the mode on/off by voice. The LLM only flips the
-flag — it is never in the control loop. `start_enabled` (param, default `true`)
-lets you run the node standalone for testing.
+**Enable/disable.** The mode is gated by `std_msgs/Bool` on
+`/jessica/finger_follow/enable`. `start_enabled` (param, default `true`) lets you
+run the node standalone for testing.
+
+**Voice control (via the chatbot).** The chatbot exposes a `follow_finger`
+robot command, so you can turn tracking on/off by voice — the LLM only publishes
+the enable flag, it is never in the control loop:
+
+- *"Jessica darling, follow my finger."* → `follow_finger {state: on}` →
+  publishes `True`.
+- *"Jessica darling, stop following my finger."* → `follow_finger {state: off}`
+  → publishes `False`.
+- Any *"stop"* command (the base emergency-stop) **also** switches finger
+  following off, so "stop" halts everything.
+
+(As with all robot commands, it only fires when prefixed with "Jessica
+darling".) You can also toggle it by hand for testing:
+
+```bash
+ros2 topic pub --once /jessica/finger_follow/enable std_msgs/msg/Bool "{data: true}"
+ros2 topic pub --once /jessica/finger_follow/enable std_msgs/msg/Bool "{data: false}"
+```
 
 **Prerequisites**
 - Hardware stack up (`jessica.launch.py`) so `pan_tilt_controller` consumes the
@@ -526,6 +578,48 @@ lets you run the node standalone for testing.
   in the venv — MediaPipe/newer tooling pulls in empy 4.x which breaks the
   rosidl CMake build with `TransientParseError`. Fix:
   `~/venvs/jazzy/bin/pip install "empy==3.3.4"`.
+
+**Running it on the robot**
+
+1. **On the Pi** — bring up the hardware stack (motors + head controllers). This
+   also starts the USB camera publisher automatically (`camera:=true` default),
+   so `/jessica/camera/image/compressed` is published for the PC:
+   ```bash
+   cd ~/jessica_ws
+   source /opt/ros/jazzy/setup.bash && source install/setup.bash
+   ros2 launch jessica_robot jessica.launch.py
+   ```
+   Sanity-check the camera is live: `ros2 topic hz /jessica/camera/image/compressed`
+   should read ~30 Hz. If it shows no publisher, the USB camera (`3D USB Camera`,
+   `/dev/video0`) may be unplugged — `lsusb` and `v4l2-ctl --list-devices` confirm it.
+2. **On the PC** — start the vision so `/jessica/hand_state` is published:
+   ```bash
+   ros2 launch stereo_pose_publisher stereo_pose.launch.py
+   ```
+   (Optional: watch the annotated stream in `rqt` on
+   `/jessica/camera/pose/compressed`.)
+3. **On the Pi** — start the follower. Two options:
+   - **Standalone** (starts tracking immediately):
+     ```bash
+     ros2 run jessica_robot finger_follower
+     ```
+   - **Voice-gated** (start disabled, let the chatbot switch it on):
+     ```bash
+     ros2 run jessica_robot finger_follower --ros-args -p start_enabled:=false
+     ```
+     Then run the chatbot (`ros2 run jessica_robot jessica_chatbot`, or via the
+     launch file) and say *"Jessica darling, follow my finger."*
+4. Hold your index finger up in front of the camera and move it around — the
+   head should follow and keep the fingertip centred. Say *"stop"* (or
+   *"stop following my finger"*) to end.
+5. **First run on hardware — check the direction.** If the head chases the
+   finger the *wrong* way, flip the sign live (no rebuild) and re-test:
+   ```bash
+   ros2 param set /finger_follower pan_sign 1.0     # left/right reversed
+   ros2 param set /finger_follower tilt_sign 1.0    # up/down reversed
+   ```
+   Once you know the correct signs, set them as the defaults in
+   `finger_follower.py`.
 
 **Tuning** (all `ros2 param set /finger_follower <name> <val>`, or edit the
 `declare_parameter` defaults):

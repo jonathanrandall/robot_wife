@@ -44,6 +44,10 @@ def generate_launch_description():
     # ros2_control). Useful before the robot hardware is wired up.
     hardware = LaunchConfiguration("hardware")
 
+    # Set camera:=false to skip the USB stereo camera publisher. It's a separate
+    # USB device from the ESP32 stack, so it's gated independently of `hardware`.
+    camera = LaunchConfiguration("camera")
+
     xacro_file       = os.path.join(pkg, "description", "jessica.urdf.xacro")
     controllers_yaml = os.path.join(pkg, "config", "jessica_controllers.yaml")
     joystick_yaml    = os.path.join(pkg, "config", "joystick.yaml")
@@ -81,7 +85,10 @@ def generate_launch_description():
         return Node(
             package="controller_manager",
             executable="spawner",
-            arguments=[name, "--controller-manager", "/controller_manager"],
+            # Generous timeout so a slow controller_manager/hardware bring-up is
+            # waited out rather than causing the spawner to die.
+            arguments=[name, "--controller-manager", "/controller_manager",
+                       "--controller-manager-timeout", "60"],
             output="screen",
         )
 
@@ -102,26 +109,29 @@ def generate_launch_description():
             "/pan_tilt_controller/joint_trajectory",
             "trajectory_msgs/msg/JointTrajectory",
             '{joint_names: ["pan_joint", "tilt_joint"], '
-            'points: [{positions: [-0.5, 0.1], time_from_start: {sec: 2}}]}',
+            'points: [{positions: [0.0, 0.0], time_from_start: {sec: 2}}]}',
         ],
         output="screen",
     )
 
-    # controller_manager up → joint_broad → diff_cont → pan_tilt → home the head.
-    spawn_joint_broad = RegisterEventHandler(
-        OnProcessStart(target_action=controller_manager,
-                       on_start=[joint_broad_spawner])
-    )
+    # Chain: controller_manager up → diff_cont → pan_tilt → joint_broad → home.
+    # joint_broad (the state broadcaster) is spawned LAST, on purpose: by then
+    # the two controllers have activated, which proves the ESP32 hardware and its
+    # state interfaces are live, so the broadcaster never races hardware bring-up.
     spawn_diff_cont = RegisterEventHandler(
-        OnProcessExit(target_action=joint_broad_spawner,
-                      on_exit=[diff_cont_spawner])
+        OnProcessStart(target_action=controller_manager,
+                       on_start=[diff_cont_spawner])
     )
     spawn_pan_tilt = RegisterEventHandler(
         OnProcessExit(target_action=diff_cont_spawner,
                       on_exit=[pan_tilt_spawner])
     )
-    home_head_on_start = RegisterEventHandler(
+    spawn_joint_broad = RegisterEventHandler(
         OnProcessExit(target_action=pan_tilt_spawner,
+                      on_exit=[joint_broad_spawner])
+    )
+    home_head_on_start = RegisterEventHandler(
+        OnProcessExit(target_action=joint_broad_spawner,
                       on_exit=[home_head])
     )
 
@@ -159,6 +169,22 @@ def generate_launch_description():
         output="screen",
     )
 
+    # ── USB stereo camera → published for the PC vision node ────────────────
+    # Feeds /jessica/camera/image/compressed, which the PC's stereo_pose_node
+    # consumes to produce hand/person state (used by finger following, etc.).
+    webcam_publisher = Node(
+        package="camera_publisher", executable="webcam_publisher",
+        name="webcam_publisher",
+        condition=IfCondition(camera),
+        output="screen", emulate_tty=True,
+    )
+
+    # ── Head tracks a raised fingertip (voice-gated) ────────────────────────
+    # Subscribes /jessica/hand_state (from the PC vision) and drives the head.
+    # start_enabled=False: comes up idle and only moves once the chatbot enables
+    # it ("follow my finger"), so it never fights the joystick/gestures unasked.
+    finger_follower = make_pynode("finger_follower")
+
     # ── Jessica's brain + appearance ────────────────────────────────────────
     chatbot  = make_pynode("jessica_chatbot")
     hair_led = make_pynode("hair_led_node")
@@ -179,6 +205,7 @@ def generate_launch_description():
             joy_button_bridge,
             twist_mux,
             twist_stamper,
+            finger_follower,
         ],
     )
 
@@ -188,7 +215,13 @@ def generate_launch_description():
             default_value="true",
             description="Bring up ESP32 ros2_control + joystick. Set false for chatbot+LEDs only.",
         ),
+        DeclareLaunchArgument(
+            "camera",
+            default_value="true",
+            description="Bring up the USB stereo camera publisher. Set false to skip it.",
+        ),
         hardware_group,
+        webcam_publisher,
         chatbot,
         hair_led,
     ])

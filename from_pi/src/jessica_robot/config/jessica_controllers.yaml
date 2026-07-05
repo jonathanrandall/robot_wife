@@ -52,6 +52,8 @@ pan_tilt_controller:
       stopped_velocity_tolerance: 0.0
       goal_time: 0.0
 
-joint_broad:
-  ros__parameters:
-    extra_joints: []
+# joint_broad (joint_state_broadcaster) needs no params — it publishes all
+# hardware joints by default. NOTE: do NOT add `extra_joints: []` here — an
+# empty YAML list has no inferable type and makes the controller fail to load
+# ("parameter_value_from failed for parameter 'extra_joints'"), which silently
+# kills /joint_states.

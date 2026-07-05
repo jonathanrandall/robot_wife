@@ -26,6 +26,7 @@
   <exec_depend>twist_mux</exec_depend>
   <exec_depend>twist_stamper</exec_depend>
   <exec_depend>esp32_combined_hardware</exec_depend>
+  <exec_depend>camera_publisher</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

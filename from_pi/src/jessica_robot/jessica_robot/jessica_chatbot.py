@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -57,6 +58,7 @@ try:
     from std_msgs.msg import Int32, Bool
     from geometry_msgs.msg import Twist
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from sensor_msgs.msg import JointState
     from builtin_interfaces.msg import Duration as DurationMsg
     ROS_AVAILABLE = True
 except ImportError:
@@ -94,9 +96,44 @@ _follow_pub  = None   # std_msgs/Bool -> /jessica/finger_follow/enable (finger_f
 HEAD_HOME_PAN  = 0.0
 HEAD_HOME_TILT = 0.0
 
-# Last commanded head pose (rad). Gestures build trajectories relative to this.
+# Last commanded head pose (rad). Fallback base for gestures if /joint_states
+# isn't available yet (dead reckoning — only correct while the chatbot is the
+# sole thing moving the head).
 _head_pan:  float = HEAD_HOME_PAN
 _head_tilt: float = HEAD_HOME_TILT
+
+# Actual head pose read from /joint_states (single source of truth). The head is
+# also moved by the joystick and finger_follower, so relative gestures must base
+# off the REAL pose, not our own last command. None until the first message.
+_joint_pan_actual:  float | None = None
+_joint_tilt_actual: float | None = None
+
+
+def _current_head_pose() -> tuple[float, float]:
+    """Head (pan, tilt) in rad. Prefer the real pose from /joint_states; fall
+    back to our last-commanded pose only if joint states haven't arrived yet."""
+    pan  = _joint_pan_actual  if _joint_pan_actual  is not None else _head_pan
+    tilt = _joint_tilt_actual if _joint_tilt_actual is not None else _head_tilt
+    return pan, tilt
+
+
+def _on_joint_states(msg):
+    """Cache the head's actual pan/tilt (matched by name, not index)."""
+    global _joint_pan_actual, _joint_tilt_actual
+    for name, pos in zip(msg.name, msg.position):
+        if name == "pan_joint":
+            _joint_pan_actual = pos
+        elif name == "tilt_joint":
+            _joint_tilt_actual = pos
+
+
+def _spin_ros(node):
+    """Spin the node in a background thread so subscriptions fire while the main
+    thread blocks on audio I/O. Exits quietly on shutdown (daemon thread)."""
+    try:
+        rclpy.spin(node)
+    except Exception:
+        pass
 
 # Motion tuning — kept gentle (the system prompt forbids fast movement).
 DRIVE_SPEED   = 0.15   # m/s
@@ -194,9 +231,9 @@ Relationship style:
 - Do not encourage Jonny to isolate himself from real people.
 
 Command qualification rule:
-- Only treat something as a robot command if Jonny begins the request with "Jessica darling".
-- If Jonny does not say "Jessica darling", choose action "none", even if he casually mentions movement, hair colour, lights, waving, turning, or driving.
-- The phrase "Jessica darling" means Jonny is deliberately giving you permission to interpret the rest of the sentence as a robot command.
+- Only treat something as a robot command if Jonny addresses you with "Jessica darling" OR "Hey Jessica".
+- If Jonny says neither "Jessica darling" nor "Hey Jessica", choose action "none", even if he casually mentions movement, hair colour, lights, waving, turning, or driving.
+- Either phrase ("Jessica darling" or "Hey Jessica") means Jonny is deliberately giving you permission to interpret the rest of the sentence as a robot command.
 - Example: "Can you change your hair colour?" is conversation only, so action "none".
 - Example: "Jessica darling, can you change your hair colour to blue?" means action "change_hair_color" with color "blue".
 - Example: "Jessica darling, turn left." means action "turn" with direction "left".
@@ -425,6 +462,18 @@ def find_mic_device_id(name: str) -> int | None:
     return None
 
 
+def _toggle_sample_rate() -> None:
+    """Flip the mic between its two supported rates (44100<->48000).
+
+    The USB mic advertises both rates; raw ALSA hw access can only open the one
+    the device is currently locked to, so if an open fails we switch to the
+    other. Blocksize is kept at ~50 ms so downstream framing math is unchanged.
+    """
+    global _actual_sample_rate, _actual_blocksize
+    _actual_sample_rate = 48000 if _actual_sample_rate != 48000 else 44100
+    _actual_blocksize   = int(_actual_sample_rate * 0.05)
+
+
 def calibrate_mic(device_id: int | None, duration: float = 2.0) -> float:
     """Measure ambient noise and return a speech energy threshold."""
     global _speech_threshold, _actual_sample_rate, _actual_blocksize
@@ -432,14 +481,26 @@ def calibrate_mic(device_id: int | None, duration: float = 2.0) -> float:
     _actual_sample_rate = int(dev_info['default_samplerate'])
     _actual_blocksize   = int(_actual_sample_rate * 0.05)  # 50 ms chunks
     print(f"\nCalibrating for ambient noise ({duration:.0f}s) at {_actual_sample_rate} Hz...")
-    frames = sd.rec(
-        int(_actual_sample_rate * duration),
-        samplerate=_actual_sample_rate,
-        channels=1,
-        dtype='int16',
-        device=device_id,
-        blocking=True,
+    # Capture ambient audio via arecord (same robust path as record_speech).
+    n_bytes = int(_actual_sample_rate * duration) * 2   # int16 mono
+    proc = subprocess.Popen(
+        ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-c", "1",
+         "-r", str(_actual_sample_rate), "-t", "raw", "-q"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
+    try:
+        raw = proc.stdout.read(n_bytes)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            proc.kill()
+    frames = np.frombuffer(raw, dtype=np.int16)
+    if frames.size == 0:
+        print("Warning: no audio during calibration — using default threshold.")
+        _speech_threshold = 300.0
+        return _speech_threshold
     ambient = float(np.abs(frames).mean())
     _speech_threshold = max(ambient * ENERGY_MARGIN, 150.0)
     print(f"Calibration done. Ambient: {ambient:.0f}  Threshold: {_speech_threshold:.0f}")
@@ -459,83 +520,91 @@ def _frames_to_wav_bytes(frames: np.ndarray) -> bytes:
 def record_speech(timeout: float | None = None) -> bytes | None:
     """
     Record until silence detected or timeout. Returns WAV bytes or None on timeout.
-    Uses a sounddevice InputStream callback — no PyAudio deadlocks.
-    """
-    q: queue.Queue = queue.Queue()
 
-    def _cb(indata, frames, time_info, status):
-        q.put(indata.copy())
+    Captures via an `arecord` subprocess (the same robust path playback uses with
+    `aplay`) instead of sounddevice/PortAudio, which stalled after playback under
+    CPU load on this hardware. arecord is a dedicated process, so a momentarily
+    starved main thread just leaves audio buffered in the pipe rather than
+    xrunning the capture; `plughw` also absorbs any 44100/48000 rate mismatch, so
+    there's no "invalid sample rate" lock either.
+    """
+    sr             = _actual_sample_rate
+    block_frames   = int(sr * 0.05)        # 50 ms blocks (matches old behaviour)
+    block_bytes    = block_frames * 2      # int16 mono = 2 bytes/frame
+    block_s        = block_frames / sr
+    silence_needed = int(PAUSE_THRESHOLD / block_s)
+
+    try:
+        proc = subprocess.Popen(
+            ["arecord", "-D", MIC_DEVICE, "-f", "S16_LE", "-c", "1",
+             "-r", str(sr), "-t", "raw", "-q"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except Exception as e:
+        print(f"Warning: could not start arecord: {e}")
+        return None
 
     chunks: list[np.ndarray] = []
-    silence_blocks  = 0
-    speech_started  = False
-    elapsed         = 0.0
-    block_s         = _actual_blocksize / _actual_sample_rate
-    silence_needed  = int(PAUSE_THRESHOLD / block_s)
+    silence_blocks = 0
+    speech_started = False
+    elapsed        = 0.0
+    try:
+        while True:
+            raw = proc.stdout.read(block_bytes)
+            if not raw or len(raw) < block_bytes:
+                # arecord ended/failed (device busy, killed, EOF).
+                print("Warning: mic capture ended early.")
+                break
+            block  = np.frombuffer(raw, dtype=np.int16)
+            elapsed += block_s
+            energy   = float(np.abs(block).mean())
 
-    # The capture stream can be slow to deliver its FIRST block — e.g. right
-    # after playback, or when opened/closed in quick succession (as DORMANT
-    # does). Give the first block a generous warm-up window (silently); once
-    # audio is flowing, use a tight timeout to catch a genuine mid-stream stall.
-    # If even the warm-up window elapses, reopen a few times before giving up,
-    # so a transient failure never silently drops a command.
-    WARMUP_TIMEOUT    = 6.0   # s — grace for the first block after opening
-    ACTIVE_TIMEOUT    = 2.0   # s — once blocks are flowing
-    MAX_STALL_RETRIES = 3
-    stalls = 0
-
-    while True:
-        with sd.InputStream(
-            samplerate=_actual_sample_rate,
-            channels=1,
-            dtype='int16',
-            device=_mic_device_id,
-            blocksize=_actual_blocksize,
-            callback=_cb,
-        ):
-            reopen    = False
-            got_first = False
-            while True:
-                try:
-                    block = q.get(timeout=ACTIVE_TIMEOUT if got_first else WARMUP_TIMEOUT)
-                except queue.Empty:
-                    # Mid-phrase or out of retries → genuine failure.
-                    if speech_started or stalls >= MAX_STALL_RETRIES:
-                        print("Warning: mic stream stalled.")
-                        return None
-                    # Stream never started delivering — reopen and try again
-                    # (quietly; the warm-up window already gave it plenty of time).
-                    stalls += 1
-                    reopen = True
-                    break
-
-                got_first = True
-                stalls = 0
-                elapsed += block_s
-                energy   = float(np.abs(block).mean())
-
-                if not speech_started:
-                    if timeout is not None and elapsed > timeout:
-                        return None
-                    if energy > _speech_threshold:
-                        speech_started = True
-                        chunks = [block]
-                        silence_blocks = 0
-                else:
-                    chunks.append(block)
-                    if energy < _speech_threshold:
-                        silence_blocks += 1
-                        if silence_blocks >= silence_needed:
-                            return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
-                    else:
-                        silence_blocks = 0
-                    if elapsed > MAX_PHRASE_SECONDS:
+            if not speech_started:
+                if timeout is not None and elapsed > timeout:
+                    return None
+                if energy > _speech_threshold:
+                    speech_started = True
+                    chunks = [block]
+                    silence_blocks = 0
+            else:
+                chunks.append(block)
+                if energy < _speech_threshold:
+                    silence_blocks += 1
+                    if silence_blocks >= silence_needed:
                         return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
+                else:
+                    silence_blocks = 0
+                if elapsed > MAX_PHRASE_SECONDS:
+                    return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
 
-        if not reopen:
-            break
+        # Loop broke out (arecord died): return whatever speech we captured.
+        if speech_started and chunks:
+            return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
+        return None
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=1.0)
+        except Exception:
+            proc.kill()
 
-    return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
+
+# Known Whisper mishearings -> intended word. Applied to every transcript so
+# wake detection, the LLM, and the log all see the corrected text. "darling" is
+# the wake/command word, so a mishear breaks both. Patterns are word-boundary,
+# case-insensitive; add more as consistent mishears show up.
+_STT_CORRECTIONS = {
+    r"\bdarlene\b": "darling",
+    r"\bdarlin\b":  "darling",
+    r"\bdarlings\b": "darling",
+}
+
+
+def _correct_transcript(text: str) -> str:
+    """Fix known STT mishearings before any downstream use."""
+    for pattern, repl in _STT_CORRECTIONS.items():
+        text = re.sub(pattern, repl, text, flags=re.IGNORECASE)
+    return text
 
 
 def transcribe(wav_bytes: bytes) -> str:
@@ -551,9 +620,13 @@ def transcribe(wav_bytes: bytes) -> str:
         response.raise_for_status()
         text = response.json().get("text", "").strip()
         if text:
-            print(f"You said: {text}")
-        else:
-            print("Could not understand audio.")
+            corrected = _correct_transcript(text)
+            if corrected != text:
+                print(f"You said: {corrected}  (corrected from: {text!r})")
+            else:
+                print(f"You said: {text}")
+            return corrected
+        print("Could not understand audio.")
         return text
     except requests.exceptions.ConnectionError:
         print(f"Whisper server unreachable at {WHISPER_URL} — is it running on the laptop?")
@@ -826,7 +899,7 @@ def do_look(direction: str, duration_s: float):
     # requested direction from where it currently is (clamped to the joint
     # limits), rather than snapping to an extreme. Ask again to keep going.
     # "center" is the exception — it re-homes to 0, 0.
-    pan, tilt = _head_pan, _head_tilt
+    pan, tilt = _current_head_pose()
     if direction == "left":
         pan = _clamp(pan + HEAD_STEP, -HEAD_PAN_MAX, HEAD_PAN_MAX)
     elif direction == "right":
@@ -842,8 +915,7 @@ def do_look(direction: str, duration_s: float):
 
 
 def do_nod(duration_s: float):
-    p = _head_pan
-    base = _head_tilt
+    p, base = _current_head_pose()
     down = _clamp(base - 0.35, HEAD_TILT_DN, HEAD_TILT_UP)
     up   = _clamp(base + 0.20, HEAD_TILT_DN, HEAD_TILT_UP)
     publish_head_trajectory([
@@ -854,8 +926,7 @@ def do_nod(duration_s: float):
 
 
 def do_shake_head(duration_s: float):
-    t = _head_tilt
-    base = _head_pan
+    base, t = _current_head_pose()
     left  = _clamp(base + 0.4, -HEAD_PAN_MAX, HEAD_PAN_MAX)
     right = _clamp(base - 0.4, -HEAD_PAN_MAX, HEAD_PAN_MAX)
     publish_head_trajectory([
@@ -868,7 +939,7 @@ def do_shake_head(duration_s: float):
 
 def do_wave(duration_s: float):
     # Jessica has no arm — greet with a friendly little head/pan wiggle.
-    t = _head_tilt
+    _, t = _current_head_pose()
     publish_head_trajectory([
         ( 0.3, t, 0.4),
         (-0.3, t, 0.8),
@@ -1030,10 +1101,64 @@ def log_feedback(label: str, note: str) -> bool:
         return False
 
 
+def log_event(kind: str, heard: str = "", reply_spoken: str = "", trigger: str = ""):
+    """Log a non-command exchange so the JSONL is a COMPLETE transcript, not just
+    the action-turns: farewells, timeouts, unintelligible speech, and anything
+    heard while dormant. Best-effort — a logging failure must never break a turn."""
+    try:
+        now = datetime.datetime.now()
+        _write_log({
+            "id":           now.strftime("%Y%m%dT%H%M%S%f"),
+            "type":         "event",
+            "ts":           now.isoformat(timespec="seconds"),
+            "kind":         kind,           # unclear | timeout | farewell | feedback_ack | dormant_ignored
+            "trigger":      trigger,
+            "heard":        heard,          # transcript ("" if nothing/not understood)
+            "reply_spoken": reply_spoken,   # what she said, if anything
+        })
+    except Exception as e:                  # never break the turn
+        print(f"(log_event failed: {e})")
+
+
+# Phrases that authorise a robot command (STT-robust, punctuation-tolerant so
+# "jessica, darling" and "hey, jessica" match). Keep in sync with the prompt.
+_COMMAND_PHRASE_RE = (r"\bjessica\W+darling\b", r"\bhey\W+jessica\b")
+
+
+def _has_command_phrase(text: str) -> bool:
+    """True if the utterance addresses Jessica with a command phrase."""
+    return any(re.search(p, text) for p in _COMMAND_PHRASE_RE)
+
+
+def _gate_robot_command(heard: str, command: dict) -> dict:
+    """Enforce the wake-phrase gate in CODE so a flaky LLM can't move the robot
+    on stray speech (e.g. it once turned "Why?" into follow_finger).
+
+    - A stop needs only "jessica" + "stop" (no "darling"): saying "jessica stop"
+      or "stop jessica" halts everything. (A bare "stop" without "jessica" is
+      NOT honoured — say "jessica stop" to be sure.)
+    - Every OTHER robot command runs only if the utterance contains a command
+      phrase ("jessica darling" or "hey jessica"); otherwise it's downgraded to
+      conversation only (Jessica still replies, but the robot doesn't act).
+    """
+    text = (heard or "").lower()
+    action = command.get("action")
+    # Safety stop: "jessica" + "stop" in any order, no command phrase required.
+    if "jessica" in text and re.search(r"\bstop\b", text):
+        return {"action": "stop", "parameters": {}, "duration_s": 0.0}
+    if action in (None, "", "none"):
+        return command
+    if not _has_command_phrase(text):
+        print(f'  (ignoring robot command "{action}" — no "Jessica darling"/"Hey Jessica")')
+        return {"action": "none", "parameters": {}, "duration_s": 0.0}
+    return command
+
+
 def process_turn(user_text: str, mp3_path: Path, trigger: str = "conversation"):
     """Run one full conversation turn: Ollama → execute → speak → log."""
     reply = ask_ollama(user_text)
     command = sanitise_robot_command(reply["robot_command"])
+    command = _gate_robot_command(user_text, command)
     execute_robot_command(command)
     speak(reply["say"], mp3_path)
     log_turn(
@@ -1107,6 +1232,12 @@ def main():
         _head_pub    = _ros_node.create_publisher(
             JointTrajectory, "/pan_tilt_controller/joint_trajectory", 10)
         _follow_pub  = _ros_node.create_publisher(Bool, "/jessica/finger_follow/enable", 10)
+        # Read the head's real pose (moved by us, the joystick, or finger_follower)
+        # so relative gestures base off the true position, not our last command.
+        _ros_node.create_subscription(JointState, "/joint_states", _on_joint_states, 10)
+        # The main loop blocks on audio I/O, so spin the node in a background
+        # thread — otherwise the /joint_states callback would never fire.
+        threading.Thread(target=_spin_ros, args=(_ros_node,), daemon=True).start()
         print("ROS 2 publishers ready: /jessica/hair_hue, /cmd_vel, "
               "/pan_tilt_controller/joint_trajectory, /jessica/finger_follow/enable")
         time.sleep(0.5)  # allow subscriber to connect before first publish
@@ -1142,7 +1273,10 @@ def main():
                     print("[IDLE] Waiting for speech...")
                     text = listen_for_speech(timeout=None)
 
-                    if text is None or text == "":
+                    if text is None:
+                        continue
+                    if text == "":
+                        log_event("unclear", trigger="idle")
                         continue
 
                     state        = CONVERSATION
@@ -1155,16 +1289,22 @@ def main():
 
                     if text is None:
                         print("Conversation timed out.")
-                        speak("I'll be here if you need me, love.", mp3_path)
+                        reply = "I'll be here if you need me, love."
+                        speak(reply, mp3_path)
+                        log_event("timeout", reply_spoken=reply, trigger="conversation")
                         state = IDLE
                         continue
 
                     if text == "":
-                        speak("Sorry sweetheart, I didn't catch that.", mp3_path)
+                        reply = "Sorry sweetheart, I didn't catch that."
+                        speak(reply, mp3_path)
+                        log_event("unclear", reply_spoken=reply, trigger="conversation")
                         continue
 
                     if is_farewell(text):
-                        speak("Bye for now, love. Talk soon.", mp3_path)
+                        reply = "Bye for now, love. Talk soon."
+                        speak(reply, mp3_path)
+                        log_event("farewell", heard=text, reply_spoken=reply, trigger="conversation")
                         print("\n[DORMANT] Muted — say a wake phrase "
                               "(e.g. 'Jessica darling') to resume.")
                         state = DORMANT
@@ -1174,26 +1314,34 @@ def main():
                     if is_approval(text):
                         if log_feedback("good", text):
                             print("[FEEDBACK] logged 👍")
-                            speak("Thank you, love. I'll remember that.", mp3_path)
+                            reply = "Thank you, love. I'll remember that."
                         else:
-                            speak("Thank you, love.", mp3_path)
+                            reply = "Thank you, love."
+                        speak(reply, mp3_path)
+                        log_event("feedback_ack", heard=text, reply_spoken=reply, trigger="conversation")
                         continue
 
                     if is_correction(text):
                         if log_feedback("bad", text):
                             print("[FEEDBACK] logged 👎 (correction)")
-                            speak("Sorry love. I've noted that so I can do better.", mp3_path)
+                            reply = "Sorry love. I've noted that so I can do better."
                         else:
-                            speak("Sorry love, I'm not sure which bit you mean.", mp3_path)
+                            reply = "Sorry love, I'm not sure which bit you mean."
+                        speak(reply, mp3_path)
+                        log_event("feedback_ack", heard=text, reply_spoken=reply, trigger="conversation")
                         continue
 
                     process_turn(text, mp3_path)
 
                 elif state == DORMANT:
-                    # Listening but silent: ignore everything until directly addressed.
+                    # Listening but silent: ignore everything until directly addressed,
+                    # but still log whatever was heard so the transcript is complete.
                     text = listen_for_speech(timeout=None)
 
-                    if not text or not is_wake_phrase(text):
+                    if not text:
+                        continue
+                    if not is_wake_phrase(text):
+                        log_event("dormant_ignored", heard=text, trigger="dormant")
                         continue
 
                     state        = CONVERSATION

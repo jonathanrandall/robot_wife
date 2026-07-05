@@ -13,7 +13,7 @@ from sensor_msgs.msg import CompressedImage
 
 WEBCAM_NAME  = "3D USB Camera"
 TOPIC        = "/jessica/camera/image/compressed"
-PUBLISH_HZ   = 30
+PUBLISH_HZ   = 22    # dropped from 30 to cut JPEG-encode CPU (was starving the mic)
 JPEG_QUALITY = 80
 
 # The stereo camera outputs a side-by-side frame (e.g. 1280×480).
