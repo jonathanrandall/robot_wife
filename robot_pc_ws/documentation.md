@@ -277,6 +277,74 @@ ros2 topic hz   /jessica/camera/pose/compressed
 
 ---
 
+## RViz — Live Robot Visualisation
+
+RViz launches automatically alongside the pose nodes.  It renders the live robot
+model using data published by the Raspberry Pi — no local `robot_state_publisher`
+or `joint_state_publisher` is needed on this PC.
+
+### How it works
+
+| Data | Source |
+|---|---|
+| `/robot_description` | Pi's `robot_state_publisher` (transient-local, published once at startup) |
+| `/tf` + `/tf_static` | Pi's `robot_state_publisher`, updated from real joint states |
+| STL mesh files | Local filesystem — resolved from `jessica_description` built in this workspace |
+
+The `jessica_description` package exists in this workspace **only** to make the
+mesh files available at `package://jessica_description/...` paths.  Everything
+else comes over the network.
+
+### Build jessica_description
+
+```bash
+cd ~/projects/robot_wife/software/robot_pc_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select jessica_description
+source install/setup.bash
+```
+
+After this, `colcon build --packages-select stereo_pose_publisher` picks up the
+`jessica_description` share path used in the launch file.
+
+### Networking check (do this before the first launch)
+
+```bash
+ros2 topic echo /robot_description --once   # model XML from the Pi
+ros2 topic echo /joint_states --once        # live joint values from the Pi
+ros2 run tf2_tools view_frames              # (optional) confirm TF tree arrives
+```
+
+If these hang, the Pi and PC are not on the same `ROS_DOMAIN_ID` or not
+discoverable over the LAN — fix that before launching.
+
+### Fixed frame
+
+`display.rviz` uses `base_link` as the fixed frame — suitable for watching the
+head pan/tilt and wheels move.  To see the robot navigate around a world frame,
+change the fixed frame to `odom` in the RViz Displays panel.
+
+### Standalone model check (no robot connected)
+
+The package ships its own `display.launch.py` with sliders for eyeballing mesh
+positions offline:
+
+```bash
+ros2 launch jessica_description display.launch.py
+```
+
+**Do not run this at the same time as the live robot** — it starts its own
+`robot_state_publisher` which would fight the Pi's.
+
+### QoS note
+
+The `display.rviz` in this workspace has `Durability Policy: Transient Local`
+on the RobotModel's Description Topic.  This ensures RViz receives the
+`/robot_description` message even when it starts after the Pi has already
+published it.
+
+---
+
 ## Planned Tasks
 
 ### Task 1 — Point and navigate

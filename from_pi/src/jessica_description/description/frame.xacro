@@ -1,0 +1,135 @@
+<?xml version="1.0"?>
+<!--
+  Jessica's frame, built from real gobilda U-channel/plate STEP meshes
+  (converted to STL in meshes/visual/, originals in meshes/step/).
+
+  Layout, bottom to top:
+    - two feet (foot_360), running fore-aft, one wheel at each end
+    - a cross-bar (cross_bar_144) bracing the feet together
+    - two legs (leg_528), standing on the feet
+    - a grid plate (grid_88_232) lying flat across the tops of the legs
+    - two body channels (body_432), standing on the grid, in line with the legs
+    - `body_top` is a virtual (visual-less) frame at the top of the body
+      channels, for pan_tilt.xacro to attach the existing placeholder
+      mast/head to while the real top mount is still being designed.
+
+  ASSUMPTIONS worth double-checking against the real build (see dimensions.xacro):
+    - cross_bar_length (144mm) is the clear gap between the feet's facing
+      inner faces, not a centre-to-centre or outer-face measurement.
+    - "cross bar is 144mm from the front" / "legs 72mm from the back" are
+      measured to each part's centreline, not to its near edge.
+    - the wheels sit on the *outer* face of each foot (i.e. the track is
+      wider than the feet), per "20mm to the closest edge of the wheel".
+    - the grid's 232mm dimension spans between the legs (Y) and 88mm is the
+      front-back depth (X); the legs/body sit centred within the 232mm span.
+
+  Every U-channel part shares the same STEP authoring convention (checked
+  against the real bounding boxes): local X is the channel's 48mm width
+  (symmetric about 0), local Y is the part's length (0 -> length), local Z
+  is the other 48mm dimension (asymmetric - the origin sits near the top
+  face). The mesh <origin> values below are computed by centring each part's
+  true STEP bounding-box centroid at the assembly position described above
+  (see meshes/step/convert_meshes.py for the bounding boxes) - not simple
+  round numbers, so don't be alarmed by values like 0.0815.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="frame_mesh_part" params="mesh_name xyz rpy box_size material:=gray">
+    <visual>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry>
+        <mesh filename="package://jessica_description/description/meshes/visual/${mesh_name}.stl" scale="0.001 0.001 0.001"/>
+      </geometry>
+      <material name="${material}"/>
+    </visual>
+    <collision>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry>
+        <box size="${box_size}"/>
+      </geometry>
+    </collision>
+  </xacro:macro>
+
+  <link name="base_link"/>
+
+  <joint name="base_footprint_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="base_footprint"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="base_footprint"/>
+
+  <joint name="chassis_joint" type="fixed">
+    <parent link="base_link"/>
+    <child  link="chassis"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+  <link name="chassis">
+
+    <!-- Every mesh <origin> below is: (layout position) + (a small fixed
+         correction, noted inline) - the correction accounts for each STEP
+         part's native origin not sitting exactly at its bounding-box
+         centroid. See the header comment for where these numbers come from. -->
+
+    <!-- Feet: native Z-axis maps straight onto global Z under this rotation,
+         so it needs the +0.0215 correction (native centroid was off-centre
+         in that axis by 21.5mm). -->
+    <xacro:frame_mesh_part mesh_name="foot_360" box_size="${channel_cross} ${foot_length} ${channel_cross}"
+      xyz="${-foot_length/2} ${foot_track_y}  ${foot_z + 0.0215}" rpy="0 0 ${-pi/2}"/>
+    <xacro:frame_mesh_part mesh_name="foot_360" box_size="${channel_cross} ${foot_length} ${channel_cross}"
+      xyz="${-foot_length/2} ${-foot_track_y} ${foot_z + 0.0215}" rpy="0 0 ${-pi/2}"/>
+
+    <!-- Cross-bar: unrotated, same Z correction as the feet. -->
+    <xacro:frame_mesh_part mesh_name="cross_bar_144" box_size="${channel_cross} ${cross_bar_length} ${channel_cross}"
+      xyz="${cross_bar_x} ${-cross_bar_length/2} ${foot_z + 0.0215}" rpy="0 0 0"/>
+
+    <!-- Legs: standing rotation moves the native Z-axis correction onto Y
+         instead (-0.0215); the Z correction cancels out exactly. -->
+    <xacro:frame_mesh_part mesh_name="leg_528" box_size="${channel_cross} ${leg_length} ${channel_cross}"
+      xyz="${leg_x}  ${foot_track_y - 0.0215} ${foot_top_z}" rpy="${pi/2} 0 0"/>
+    <xacro:frame_mesh_part mesh_name="leg_528" box_size="${channel_cross} ${leg_length} ${channel_cross}"
+      xyz="${leg_x} ${-foot_track_y - 0.0215} ${foot_top_z}" rpy="${pi/2} 0 0"/>
+
+    <!-- Grid, lying flat across the leg tops: fixed 40mm/112mm/1.25mm native
+         offsets (see convert_meshes.py output), Z correction cancels out. -->
+    <xacro:frame_mesh_part mesh_name="grid_88_232" box_size="${grid_x} ${grid_thickness} ${grid_y}"
+      xyz="${body_x - 0.040} 0.112 ${leg_top_z}" rpy="${pi/2} 0 0"/>
+
+    <!-- Body channels: same rotation/correction pattern as the legs, Z correction cancels out. -->
+    <xacro:frame_mesh_part mesh_name="body_432" box_size="${channel_cross} ${body_length} ${channel_cross}"
+      xyz="${body_x}  ${foot_track_y - 0.0215} ${grid_top_z}" rpy="${pi/2} 0 0"/>
+    <xacro:frame_mesh_part mesh_name="body_432" box_size="${channel_cross} ${body_length} ${channel_cross}"
+      xyz="${body_x} ${-foot_track_y - 0.0215} ${grid_top_z}" rpy="${pi/2} 0 0"/>
+
+    <!-- Front panel (wife_boobs_v2_13.stl) - a bowl shape; flat rim (the
+         mesh's flat reference plane) goes against the body, curved bottom
+         sticks out forward. rpy=(90,90,-90)deg (URDF fixed-axis roll/pitch/yaw)
+         puts the rotated bounding box at X in [0, 66.993], Y in [-76.9997,
+         66.9998], Z in [-52, 68.951] before translation - the rim lands
+         exactly at rotated X=0 with no correction needed, which is a good
+         sign this orientation (vs. the previous +90deg yaw) is the right one:
+           - top-aligned: rotated Z-max (68.951mm) placed at body_top_z
+           - right-aligned: rotated Y-min (-76.9997mm) placed at the right
+             body channel's outer face
+           - forward-touching: rotated X-min (0, the rim) placed at the
+             body's front face, bowl curving forward from there -->
+    <xacro:frame_mesh_part mesh_name="robot_front" material="white" box_size="0.121 0.144 0.067"
+      xyz="${body_x + channel_cross/2} ${-(foot_track_y + channel_cross/2) + 0.077000} ${body_top_z - 0.068951}" rpy="${pi/2} ${pi/2} ${-pi/2}"/>
+
+    <!-- Same part, mirrored to the left side. The rotated bounding box isn't
+         symmetric in Y (-76.9997 to 66.9998), so this isn't just the negative
+         of the right copy's Y - it's the *other* extreme (rotated Y-max)
+         placed at the left body channel's outer face. -->
+    <xacro:frame_mesh_part mesh_name="robot_front" material="white" box_size="0.121 0.144 0.067"
+      xyz="${body_x + channel_cross/2} ${foot_track_y + channel_cross/2 - 0.067000} ${body_top_z - 0.068951}" rpy="${pi/2} ${pi/2} ${-pi/2}"/>
+
+  </link>
+
+  <joint name="body_top_joint" type="fixed">
+    <parent link="chassis"/>
+    <child  link="body_top"/>
+    <origin xyz="${body_x} 0 ${body_top_z}" rpy="0 0 0"/>
+  </joint>
+  <link name="body_top"/>
+
+</robot>

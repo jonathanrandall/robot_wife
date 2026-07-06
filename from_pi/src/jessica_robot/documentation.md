@@ -234,12 +234,68 @@ Increase `PAUSE_THRESHOLD` if Jessica cuts you off mid-sentence.
 
 ### Robot command trigger
 
-Jessica only executes hardware commands when Jonny says **"Jessica darling"**
-at the start of the request, e.g.:
+Jessica only executes hardware commands when the request contains
+**"Jessica darling"** or **"Hey Jessica"**, e.g.:
 - *"Jessica darling, change your hair to purple."*
-- *"Jessica darling, turn left."*
+- *"Hey Jessica, turn left."*
 
-Without "Jessica darling", she treats the message as conversation only.
+Without a command phrase she treats the message as conversation only. This is
+enforced **in code** (`_gate_robot_command`), not just in the prompt — the LLM
+sometimes hallucinates commands from casual chat ("Why?" once started finger
+following), so any action returned without a command phrase in the transcript
+is discarded before execution. Exception: **"Jessica … stop"** (any sentence
+containing both words) always executes a stop, no full command phrase needed.
+
+Wake phrases (un-muting from DORMANT) are deliberately broader than command
+phrases: *jessica darling*, *hey jessica*, *hello jessica*, *hi jessica*.
+
+### Robot command list
+
+| Action | Parameters | Notes |
+|---|---|---|
+| `stop` | — | Halts base + cancels any timed move/twirl/dance + finger/person following off |
+| `drive` | `direction` fwd/back | Timed: `duration_s` 0.1–8.0 s (say *"for five seconds"*) |
+| `turn` | `direction` left/right | Timed, same duration range |
+| `twirl` | `rotations` 1–3, `direction` | Full on-the-spot rotations; time computed in code (`TWIRL_SPEED` 1.2 rad/s ≈ 5.2 s/rotation, open-loop — accuracy depends on `wheel_separation`) |
+| `dance` | — | Canned ~14 s routine in code: rainbow hair + head bops + sway + one twirl |
+| `look` / `nod` / `shake_head` / `wave` | `direction` for look | Head gestures (relative to current pose from `/joint_states`) |
+| `change_hair_color` | `color` | LED hue |
+| `follow_finger` | `state` on/off | Head tracks index fingertip |
+| `follow_me` | `state` on/off | Base+head follow the person (see Person following) |
+
+**Timed moves never block.** `drive_base()` runs in a background thread
+(`_move_worker`), so the mic keeps listening during a 5 s drive and
+*"Jessica stop"* (voice) or the joystick (twist_mux priority) interrupts
+mid-move. A new move command cancels the previous one.
+
+### General stop gesture — BOTH ARMS RAISED
+
+Raise **both arms** (each wrist a margin above its own shoulder) and hold for
+~0.4 s → everything stops: timed moves/twirls/dance are cancelled, the base is
+zeroed, and finger + person following switch off.
+
+- Detected by the `stop_gesture` node (always running) from
+  `/jessica/person_state`; publishes one `std_msgs/Empty` on `/jessica/stop`
+  per raise (re-arms when the arms come down).
+- **No blocking, unlike the voice stop**: the voice path waits on
+  record → Whisper → LLM → reply, but the gesture path is
+  vision (30 Hz) → callback arithmetic → `/jessica/stop` → each consumer's
+  callback. In the chatbot it runs on the ROS **spin thread** (not the audio
+  loop), so it fires even while Jessica is recording or speaking; the move
+  worker checks its cancel flag every 50 ms. Gesture-to-wheels-stopped is
+  roughly the vision latency + 50 ms (well under half a second).
+- Each mover stops **itself** (chatbot, finger_follower, person_follower all
+  subscribe) — no single consumer is a point of failure.
+- Limitation: PersonState landmarks are only valid when **both** stereo eyes
+  see them (the PC zeroes single-eye landmarks), so wrists + shoulders must be
+  visible to both cameras. Single-eye detection would need a small PC-side
+  2-D check published as a bool.
+- Tuning: `ros2 param set /stop_gesture wrist_margin 0.08` (m above shoulder),
+  `hold_s` (debounce), `refire_s`.
+
+(The raised-open-palm gesture is different and narrower: it only stops the
+person follower, and is only evaluated while following — see Person
+following.)
 
 ---
 
@@ -637,13 +693,61 @@ Directions were verified offline with a synthetic `HandState`: a fingertip to
 the right + below centre pans the head right and tilts it down (chasing the
 finger). If the real robot moves the wrong way, flip `pan_sign`/`tilt_sign`.
 
+## Person following ("follow me")
+
+`person_follower` (`jessica_robot/person_follower.py`) drives the **base and
+head** to follow Jonny, using the shoulder data the PC already publishes on
+`/jessica/person_state` (`shoulder_midpoint` + per-shoulder landmarks, camera
+optical frame: Z fwd, X right, Y down, metres).
+
+**Behaviour**
+- **Head**: same visual-servo P-loop as the finger follower, keeping the
+  shoulder midpoint centred in the image.
+- **Distance**: P-control on shoulder depth — holds `target_dist` (0.70 m),
+  drives forward when too far (deadband so it doesn't hunt), **never reverses
+  toward the person**, and won't advance inside `min_dist` (0.5 m).
+- **Steering**: the camera rides on the head, so the current pan angle + the
+  in-image offset *is* the person's bearing; the base steers to zero it
+  (head does the fast tracking, base slowly turns to follow).
+- Everything is timer-driven pub/sub — nothing blocks; the chatbot only flips
+  the enable flag and is never in the loop.
+
+**Auto-stop conditions** (each disables following + halts the base):
+- **You turn around** — shoulders are anatomically labelled, so from behind
+  your left shoulder appears camera-left; when the left/right x-order flips
+  (debounced), you're facing the robot → stop.
+- **Raised open palm** — computed on the Pi from `/jessica/hand_state`
+  landmarks: hand detected with fingers extended and pointing up (fingertips
+  above wrist — optical Y is down), debounced. **Only checked while following
+  is enabled**, so waving during normal conversation can't trigger anything.
+  Note: from directly behind, a hand in front of your chest is hidden by your
+  body — raise it beside/above your shoulder so the camera can see it.
+- **Person lost** for `lost_timeout` → base stops (head holds); following
+  stays enabled and resumes when you're seen again.
+
+**Voice control**: *"Jessica darling, follow me"* → `follow_me {state: on}`;
+*"stop following me"* → off; any *"stop"* (including bare *"Jessica stop"*)
+halts it too. Manual toggle:
+
+```bash
+ros2 topic pub --once /jessica/person_follow/enable std_msgs/msg/Bool "{data: true}"
+```
+
+**Safety rails**: acts only on `shoulder_midpoint_valid` data, speed-capped,
+joystick (higher twist_mux priority) always overrides, and the follower comes
+up disabled (`start_enabled:=false` in the launch).
+
+Planned next: side-offset modes (follow 1 m to your left/right by holding a
+target bearing instead of zero) — `position` parameter exists but only
+`behind` is implemented.
+
 ## Still future
 
-- **Follow-me / point-and-navigate** — the PC also publishes
-  `/jessica/person_state` (shoulder midpoint, pointing ray). Same pattern:
-  a mode node the LLM enables. See `temp/from_pc/documentation.md` Tasks 1–2.
+- **Point-and-navigate** — `/jessica/person_state` also carries a pointing
+  ray. Same pattern: a mode node the LLM enables. See
+  `temp/from_pc/documentation.md` Tasks 1–2.
 - **Lidar** — standard ROS 2 lidar driver publishing `sensor_msgs/LaserScan`
 
 ---
 
-*Last updated: 2026-07-04*
+*Last updated: 2026-07-06*

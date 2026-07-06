@@ -22,7 +22,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Empty
 from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration as DurationMsg
@@ -58,7 +58,7 @@ class FingerFollower(Node):
         # integral controller with that lag oscillates if the gain is high.
         # Measured plant sensitivity ~250-300 px/rad, so ~0.0006 gives a gentle
         # ~15%/cycle correction that stays stable. Tune up if tracking is sluggish.
-        self.declare_parameter("pan_gain", 0.0003)
+        self.declare_parameter("pan_gain", 0.00035)
         # Tilt plant is more sensitive than pan (px/rad) AND has more loop lag,
         # so it needs a notably lower gain or up/down oscillates. Tuned on the
         # robot 2026-07-05.
@@ -134,6 +134,9 @@ class FingerFollower(Node):
             HandState, "/jessica/hand_state", self.on_hand, sensor_qos)
         self.create_subscription(
             Bool, "/jessica/finger_follow/enable", self.on_enable, 10)
+        # General stop (both-arms-raised gesture / stop_gesture node): every
+        # mover stops itself so no single consumer is a point of failure.
+        self.create_subscription(Empty, "/jessica/stop", self.on_stop, 10)
         # Current head pose so we can start tracking from wherever the head
         # actually is (no jerk to a hardcoded home). joint_state_broadcaster
         # publishes reliably at the controller update rate.
@@ -193,6 +196,12 @@ class FingerFollower(Node):
                 self.get_logger().warn(
                     "no /joint_states yet — starting from HOME constant "
                     f"({HOME_PAN:+.2f}, {HOME_TILT:+.2f})")
+
+    def on_stop(self, _msg):
+        if self.enabled:
+            self.enabled = False
+            self._pan_err = self._tilt_err = None
+            self.get_logger().info("general stop — finger following DISABLED")
 
     def on_hand(self, msg: HandState):
         """Pick the raised fingertip and cache its pixel error from centre."""

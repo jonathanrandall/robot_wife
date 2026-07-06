@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<!--
+  Stereo camera pair mounted on the face, camera_baseline apart, centred on
+  the head's front surface and vertical mid-height (see dimensions.xacro -
+  camera_face_x/z are placeholder guesses at "the middle of the face" since
+  there's no eye/mount reference on the head mesh to key off of; nudge
+  camera_face_x/z once you see it in RViz).
+
+  Each camera gets a _link (box, for a RobotModel-visible camera body) and an
+  _optical_link (REP103 optical-frame convention: Z forward, X right, Y down
+  - what camera drivers/image_proc expect for the frame_id on camera_info).
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="camera" params="name xyz">
+    <joint name="${name}_joint" type="fixed">
+      <parent link="head"/>
+      <child  link="${name}_link"/>
+      <origin xyz="${xyz}" rpy="0 0 0"/>
+    </joint>
+    <link name="${name}_link">
+      <visual>
+        <geometry><box size="0.01 0.02 0.02"/></geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <geometry><box size="0.01 0.02 0.02"/></geometry>
+      </collision>
+    </link>
+
+    <joint name="${name}_optical_joint" type="fixed">
+      <parent link="${name}_link"/>
+      <child  link="${name}_optical_link"/>
+      <origin xyz="0 0 0" rpy="${-pi/2} 0 ${-pi/2}"/>
+    </joint>
+    <link name="${name}_optical_link"/>
+  </xacro:macro>
+
+  <xacro:camera name="left_camera"  xyz="${camera_face_x + 0.005}  ${camera_baseline/2} ${camera_face_z}"/>
+  <xacro:camera name="right_camera" xyz="${camera_face_x + 0.005} ${-camera_baseline/2} ${camera_face_z}"/>
+
+</robot>

@@ -39,6 +39,10 @@ def make_pynode(executable, **kwargs):
 
 def generate_launch_description():
     pkg = get_package_share_directory("jessica_robot")
+    # The URDF/xacro now lives in its own package (jessica_description) so the
+    # modular xacro + gobilda meshes stay together and package:// mesh paths
+    # resolve. jessica_robot only owns nodes/config/launch now.
+    desc_pkg = get_package_share_directory("jessica_description")
 
     # Set hardware:=false to run just the chatbot + LEDs (no ESP32 / joystick /
     # ros2_control). Useful before the robot hardware is wired up.
@@ -48,7 +52,7 @@ def generate_launch_description():
     # USB device from the ESP32 stack, so it's gated independently of `hardware`.
     camera = LaunchConfiguration("camera")
 
-    xacro_file       = os.path.join(pkg, "description", "jessica.urdf.xacro")
+    xacro_file       = os.path.join(desc_pkg, "description", "jessica.urdf.xacro")
     controllers_yaml = os.path.join(pkg, "config", "jessica_controllers.yaml")
     joystick_yaml    = os.path.join(pkg, "config", "joystick.yaml")
     twist_mux_yaml   = os.path.join(pkg, "config", "twist_mux.yaml")
@@ -185,6 +189,17 @@ def generate_launch_description():
     # it ("follow my finger"), so it never fights the joystick/gestures unasked.
     finger_follower = make_pynode("finger_follower")
 
+    # ── Base + head follow the person (voice-gated) ─────────────────────────
+    # Subscribes /jessica/person_state (+ hand_state for the raised-palm stop)
+    # and drives head + /cmd_vel. Comes up idle (start_enabled=False default);
+    # "Jessica darling, follow me" enables it.
+    person_follower = make_pynode("person_follower")
+
+    # ── General stop gesture: both arms raised → /jessica/stop ─────────────
+    # Always watching. The chatbot (cancels timed moves) and both followers
+    # subscribe and each stop themselves.
+    stop_gesture = make_pynode("stop_gesture")
+
     # ── Jessica's brain + appearance ────────────────────────────────────────
     chatbot  = make_pynode("jessica_chatbot")
     hair_led = make_pynode("hair_led_node")
@@ -206,6 +221,8 @@ def generate_launch_description():
             twist_mux,
             twist_stamper,
             finger_follower,
+            person_follower,
+            stop_gesture,
         ],
     )
 

@@ -27,6 +27,8 @@ setup(
             'hair_led_node   = jessica_robot.hair_led_node:main',
             'pan_tilt_teleop = jessica_robot.pan_tilt_teleop:main',
             'finger_follower = jessica_robot.finger_follower:main',
+            'person_follower = jessica_robot.person_follower:main',
+            'stop_gesture    = jessica_robot.stop_gesture:main',
         ],
     },
 )

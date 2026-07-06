@@ -15,6 +15,7 @@
   <depend>sensor_msgs</depend>
 
   <!-- Runtime nodes brought up by jessica.launch.py -->
+  <exec_depend>jessica_description</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>xacro</exec_depend>
   <exec_depend>controller_manager</exec_depend>

@@ -1,0 +1,48 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <ros2_control name="JessicaESP32" type="system">
+    <hardware>
+      <plugin>esp32_combined_hardware/ESP32CombinedHardware</plugin>
+      <param name="device">/dev/esp32_motor</param>
+      <param name="baud_rate">115200</param>
+      <param name="timeout_ms">25</param>   <!-- MUST be < loop period (33ms@30Hz). ReadLine blocks the RT loop up to this long when the ESP32 doesn't reply. -->
+
+      <param name="wheel_radius">7.2</param>        <!-- cm, used by hardware protocol -->
+      <param name="enc_counts_per_rev">1425</param>
+    </hardware>
+
+    <!-- Wheels: velocity command, position+velocity state (order matters: 0-3) -->
+    <joint name="left_front_wheel_joint">
+      <command_interface name="velocity"><param name="min">-10</param><param name="max">10</param></command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="left_rear_wheel_joint">
+      <command_interface name="velocity"><param name="min">-10</param><param name="max">10</param></command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_front_wheel_joint">
+      <command_interface name="velocity"><param name="min">-10</param><param name="max">10</param></command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    <joint name="right_rear_wheel_joint">
+      <command_interface name="velocity"><param name="min">-10</param><param name="max">10</param></command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- Pan-tilt servos: position command + position state (order matters: 4-5) -->
+    <joint name="pan_joint">
+      <command_interface name="position"><param name="min">-1.57</param><param name="max">1.57</param></command_interface>
+      <state_interface name="position"/>
+    </joint>
+    <joint name="tilt_joint">
+      <command_interface name="position"><param name="min">-1.5</param><param name="max">0.87</param></command_interface>
+      <state_interface name="position"/>
+    </joint>
+  </ros2_control>
+
+</robot>

@@ -10,6 +10,7 @@ sys.path.insert(0, '/home/jonny/venvs/jazzy/lib/python3.12/site-packages')
 import ctypes
 import datetime
 import json
+import math
 import os
 import re
 import subprocess
@@ -55,7 +56,7 @@ from piper.voice import PiperVoice
 
 try:
     import rclpy
-    from std_msgs.msg import Int32, Bool
+    from std_msgs.msg import Int32, Bool, Empty
     from geometry_msgs.msg import Twist
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
     from sensor_msgs.msg import JointState
@@ -90,6 +91,7 @@ _hair_pub    = None
 _cmd_vel_pub = None   # geometry_msgs/Twist  -> /cmd_vel (autonomous channel)
 _head_pub    = None   # trajectory_msgs/JointTrajectory -> /pan_tilt_controller
 _follow_pub  = None   # std_msgs/Bool -> /jessica/finger_follow/enable (finger_follower node)
+_follow_me_pub = None # std_msgs/Bool -> /jessica/person_follow/enable (person_follower node)
 
 # Head starting pose (rad). MUST match the launch file's home_head trajectory,
 # so the chatbot's relative "look" nudges begin from where the head really is.
@@ -138,6 +140,9 @@ def _spin_ros(node):
 # Motion tuning — kept gentle (the system prompt forbids fast movement).
 DRIVE_SPEED   = 0.15   # m/s
 TURN_SPEED    = 0.6    # rad/s
+TWIRL_SPEED   = 1.2    # rad/s for full-rotation twirls (~5.2 s per rotation)
+MOVE_MAX_S    = 8.0    # cap on any single timed drive/turn ("forward for 5 seconds")
+TWIRL_MAX_ROT = 3      # cap on rotations per twirl command
 HEAD_PAN_MAX  = 1.4    # rad, soft clamp
 HEAD_TILT_UP  = 0.8    # rad (positive = up)
 HEAD_TILT_DN  = -1.4   # rad (negative = down)
@@ -252,15 +257,22 @@ You may only request one of these actions:
 - "shake_head"
 - "drive"
 - "turn"
+- "twirl"
+- "dance"
 - "follow_finger"
+- "follow_me"
 
 Action and parameter rules:
 - For "change_hair_color", use parameters like {"color": "blue"}.
 - For "look", use parameters like {"direction": "left"}, {"direction": "right"}, {"direction": "up"}, {"direction": "down"}, or {"direction": "center"}.
 - For "drive", use parameters like {"direction": "forward"} or {"direction": "backward"}.
 - For "turn", use parameters like {"direction": "left"} or {"direction": "right"}.
+- For "twirl", use parameters like {"rotations": 1} or {"rotations": 2}. A twirl is a full spin on the spot. Use it when Jonny says twirl, spin around, spin, do a twirl, or do a spin. Maximum 3 rotations.
+- For "dance", use parameters {}. Use it when Jonny asks you to dance. The robot performs its own dance routine, you do not choreograph it.
 - For "follow_finger", use parameters {"state": "on"} to start tracking or {"state": "off"} to stop.
+- For "follow_me", use parameters {"state": "on"} or {"state": "off"}. Use it when Jonny says follow me, come with me, walk with me, or stop following me. The robot then follows Jonny around by itself.
 - For "wave", "nod", "shake_head", "stop", and "none", use parameters {}.
+- If Jonny gives a time, like "for five seconds", set duration_s to that number of seconds.
 
 Finger-following rules:
 - If Jonny says "Jessica darling" and asks you to follow his finger, watch his finger, track his finger, or keep your eyes on his finger, use action "follow_finger" with {"state": "on"}.
@@ -347,6 +359,56 @@ Assistant:
   }
 }
 
+User: "Jessica darling, move forward for five seconds."
+Assistant:
+{
+  "say": "Moving forward for five seconds, love.",
+  "robot_command": {
+    "action": "drive",
+    "parameters": {
+      "direction": "forward"
+    },
+    "duration_s": 5.0
+  }
+}
+
+User: "Jessica darling, can you spin around?"
+Assistant:
+{
+  "say": "Spinning around, love!",
+  "robot_command": {
+    "action": "twirl",
+    "parameters": {
+      "rotations": 1
+    },
+    "duration_s": 0.0
+  }
+}
+
+User: "Jessica darling, do two twirls."
+Assistant:
+{
+  "say": "Two twirls coming up, sweetheart!",
+  "robot_command": {
+    "action": "twirl",
+    "parameters": {
+      "rotations": 2
+    },
+    "duration_s": 0.0
+  }
+}
+
+User: "Jessica darling, dance for me."
+Assistant:
+{
+  "say": "Watch me shake it, babe!",
+  "robot_command": {
+    "action": "dance",
+    "parameters": {},
+    "duration_s": 0.0
+  }
+}
+
 User: "Jessica darling, look right."
 Assistant:
 {
@@ -397,6 +459,32 @@ Assistant:
   }
 }
 
+User: "Jessica darling, follow me."
+Assistant:
+{
+  "say": "Right behind you, love!",
+  "robot_command": {
+    "action": "follow_me",
+    "parameters": {
+      "state": "on"
+    },
+    "duration_s": 0.0
+  }
+}
+
+User: "Jessica darling, stop following me."
+Assistant:
+{
+  "say": "Okay, I'll stay here, sweetheart.",
+  "robot_command": {
+    "action": "follow_me",
+    "parameters": {
+      "state": "off"
+    },
+    "duration_s": 0.0
+  }
+}
+
 Output format:
 Return ONLY valid JSON.
 Do not use markdown.
@@ -419,7 +507,8 @@ The "parameters" field must be an object.
 The "duration_s" field must be a number.
 
 For "none" and "stop", duration_s must be 0.0.
-For "drive" and "turn", duration_s must be between 0.1 and 1.0.
+For "drive" and "turn", duration_s must be between 0.1 and 8.0. Use the number of seconds Jonny asked for, or 0.5 if he gave no time.
+For "twirl" and "dance", duration_s must be 0.0. The robot times these itself.
 For gesture commands and appearance commands, duration_s must be between 0.1 and 2.0.
 """.strip()
 
@@ -597,6 +686,7 @@ _STT_CORRECTIONS = {
     r"\bdarlene\b": "darling",
     r"\bdarlin\b":  "darling",
     r"\bdarlings\b": "darling",
+    r"\bdaling\b":  "darling",   # seen in logs: "Jessica Daling"
 }
 
 
@@ -652,6 +742,7 @@ def sanitise_robot_command(command: dict) -> dict:
     allowed_actions = {
         "none", "stop", "change_hair_color",
         "wave", "look", "nod", "shake_head", "drive", "turn", "follow_finger",
+        "follow_me", "twirl", "dance",
     }
 
     allowed_colors = {
@@ -705,16 +796,32 @@ def sanitise_robot_command(command: dict) -> dict:
         if direction not in allowed_drive_directions:
             return {"action": "none", "parameters": {}, "duration_s": 0.0}
         parameters = {"direction": direction}
-        duration_s = min(max(duration_s, 0.1), 1.0)
+        duration_s = min(max(duration_s, 0.1), MOVE_MAX_S)
 
     elif action == "turn":
         direction = str(parameters.get("direction", "")).strip().lower()
         if direction not in allowed_turn_directions:
             return {"action": "none", "parameters": {}, "duration_s": 0.0}
         parameters = {"direction": direction}
-        duration_s = min(max(duration_s, 0.1), 1.0)
+        duration_s = min(max(duration_s, 0.1), MOVE_MAX_S)
 
-    elif action == "follow_finger":
+    elif action == "twirl":
+        try:
+            rotations = int(float(parameters.get("rotations", 1)))
+        except (TypeError, ValueError):
+            rotations = 1
+        rotations = min(max(rotations, 1), TWIRL_MAX_ROT)
+        direction = str(parameters.get("direction", "left")).strip().lower()
+        if direction not in allowed_turn_directions:
+            direction = "left"
+        parameters = {"rotations": rotations, "direction": direction}
+        duration_s = 0.0   # computed from rotations in do_twirl, not by the LLM
+
+    elif action == "dance":
+        parameters = {}
+        duration_s = 0.0
+
+    elif action in {"follow_finger", "follow_me"}:
         state = str(parameters.get("state", "on")).strip().lower()
         # Accept a few natural synonyms for on/off.
         if state in {"on", "start", "begin", "true", "enable", "yes"}:
@@ -859,25 +966,56 @@ def publish_head_trajectory(points: list[tuple[float, float, float]]):
     _head_pan, _head_tilt = points[-1][0], points[-1][1]
 
 
-def drive_base(linear: float, angular: float, duration_s: float):
-    """
-    Hold a Twist on the autonomous channel for duration_s, then stop.
-    Republishes at 20 Hz so twist_mux doesn't time the command out mid-move.
-    The joystick (higher priority) can override at any moment.
-    """
-    if _cmd_vel_pub is None:
-        print(f"  (cmd_vel publisher unavailable — would drive lin={linear} ang={angular})")
-        return
+# Timed base moves run in a background thread so the main loop keeps listening
+# — "Jessica stop" mid-move must be heard and must cut the move short. Without
+# this, a 5 s drive would deafen the mic for 5 s (the old inline sleep loop).
+# The RLock serialises start/cancel across threads: stops can now also arrive
+# on the ROS spin thread (the /jessica/stop gesture), not just the main loop.
+_move_stop = threading.Event()
+_move_thread: threading.Thread | None = None
+_move_lock = threading.RLock()
 
+
+def _move_worker(linear: float, angular: float, duration_s: float):
+    """Hold a Twist for duration_s (or until _move_stop), republishing at 20 Hz
+    so twist_mux doesn't time the command out mid-move. The joystick (higher
+    mux priority) can still override at any moment."""
     rate_s = 0.05
     steps  = max(1, int(duration_s / rate_s))
     cmd = Twist()
     cmd.linear.x  = float(linear)
     cmd.angular.z = float(angular)
     for _ in range(steps):
+        if _move_stop.is_set():
+            break
         _cmd_vel_pub.publish(cmd)
         time.sleep(rate_s)
     _cmd_vel_pub.publish(Twist())  # full stop
+
+
+def cancel_base_move():
+    """Abort any in-flight timed move and wait for its stop-Twist to go out."""
+    global _move_thread
+    with _move_lock:
+        _move_stop.set()
+        if _move_thread is not None and _move_thread.is_alive():
+            _move_thread.join(timeout=1.0)
+        _move_thread = None
+
+
+def drive_base(linear: float, angular: float, duration_s: float):
+    """Start a timed move in the background (cancelling any previous one)."""
+    if _cmd_vel_pub is None:
+        print(f"  (cmd_vel publisher unavailable — would drive lin={linear} ang={angular})")
+        return
+    global _move_thread
+    with _move_lock:
+        cancel_base_move()
+        _move_stop.clear()
+        _move_thread = threading.Thread(
+            target=_move_worker, args=(linear, angular, duration_s), daemon=True
+        )
+        _move_thread.start()
 
 
 def _set_finger_follow(enable: bool):
@@ -892,6 +1030,32 @@ def _set_finger_follow(enable: bool):
     msg = Bool()
     msg.data = bool(enable)
     _follow_pub.publish(msg)
+
+
+def _set_person_follow(enable: bool):
+    """Toggle the person_follower node via /jessica/person_follow/enable.
+    Same pattern as finger following: the chatbot only flips the flag; the
+    follow control loop lives in the separate person_follower node."""
+    if _follow_me_pub is None:
+        print(f"  (person-follow publisher unavailable — would set enable={enable})")
+        return
+    msg = Bool()
+    msg.data = bool(enable)
+    _follow_me_pub.publish(msg)
+
+
+def _on_stop_gesture(_msg):
+    """/jessica/stop (both-arms-raised gesture, via the stop_gesture node):
+    same effect as the spoken "stop", but runs on the ROS spin thread so it
+    works instantly even while the audio loop is recording/thinking/speaking.
+    (The followers also stop themselves on this topic — this is belt-and-braces
+    plus cancelling OUR timed moves, which only we can do.)"""
+    print("\n[stop gesture] both arms raised — stopping everything.")
+    cancel_base_move()
+    if _cmd_vel_pub is not None:
+        _cmd_vel_pub.publish(Twist())
+    _set_finger_follow(False)
+    _set_person_follow(False)
 
 
 def do_look(direction: str, duration_s: float):
@@ -948,6 +1112,70 @@ def do_wave(duration_s: float):
     ])
 
 
+def do_twirl(rotations: int, direction: str = "left"):
+    """Full base rotations. Duration is computed here from TWIRL_SPEED — the
+    LLM only supplies the count, so timing can't be hallucinated. Accuracy is
+    open-loop (depends on wheel_separation calibration)."""
+    sign = 1.0 if direction == "left" else -1.0
+    duration = rotations * 2.0 * math.pi / TWIRL_SPEED
+    print(f"Twirling {rotations}x {direction} (~{duration:.1f}s).")
+    drive_base(0.0, sign * TWIRL_SPEED, duration)
+
+
+def _dance_worker():
+    """Canned ~14 s choreography: rainbow hair + head bops + base wiggles +
+    one full twirl, then back home. Checks _move_stop between phases so
+    "Jessica stop" (or the joystick) can cut it off; motion itself is the same
+    capped-speed twist publishing as any other move."""
+    def base(linear, angular, secs):
+        cmd = Twist()
+        cmd.linear.x, cmd.angular.z = float(linear), float(angular)
+        end = time.time() + secs
+        while time.time() < end:
+            if _move_stop.is_set():
+                return False
+            _cmd_vel_pub.publish(cmd)
+            time.sleep(0.05)
+        return True
+
+    # Rainbow hair for the show.
+    if _hair_pub is not None:
+        msg = Int32(); msg.data = -2
+        _hair_pub.publish(msg)
+
+    # Head bops (fire-and-forget trajectory, runs while the base wiggles).
+    _, t0 = _current_head_pose()
+    publish_head_trajectory([
+        ( 0.4, _clamp(t0 - 0.3, HEAD_TILT_DN, HEAD_TILT_UP), 0.6),
+        (-0.4, _clamp(t0 + 0.2, HEAD_TILT_DN, HEAD_TILT_UP), 1.2),
+        ( 0.4, _clamp(t0 - 0.3, HEAD_TILT_DN, HEAD_TILT_UP), 1.8),
+        (-0.4, _clamp(t0 + 0.2, HEAD_TILT_DN, HEAD_TILT_UP), 2.4),
+        ( 0.0, t0, 3.0),
+    ])
+
+    # Base: sway left/right, then one full twirl, then settle.
+    ok = (base(0.0,  TURN_SPEED, 0.8) and base(0.0, -TURN_SPEED, 1.6)
+          and base(0.0,  TURN_SPEED, 0.8)
+          and base(0.0, TWIRL_SPEED, 2.0 * math.pi / TWIRL_SPEED))
+    _cmd_vel_pub.publish(Twist())  # full stop
+    if ok:
+        publish_head_trajectory([(0.0, 0.0, 1.0)])  # take a bow: home the head
+
+
+def do_dance():
+    """Run the dance in the shared move thread so stop/cancel semantics are
+    identical to drive/turn/twirl."""
+    if _cmd_vel_pub is None:
+        print("  (cmd_vel publisher unavailable — would dance)")
+        return
+    global _move_thread
+    with _move_lock:
+        cancel_base_move()
+        _move_stop.clear()
+        _move_thread = threading.Thread(target=_dance_worker, daemon=True)
+        _move_thread.start()
+
+
 def execute_robot_command(command: dict):
     print("\nRobot command:", json.dumps(command))
 
@@ -960,16 +1188,24 @@ def execute_robot_command(command: dict):
 
     if action == "stop":
         print("Stopping the base.")
+        cancel_base_move()   # abort any in-flight timed move / twirl / dance
         if _cmd_vel_pub is not None:
             _cmd_vel_pub.publish(Twist())
-        # "Stop" halts everything, including finger following.
+        # "Stop" halts everything, including finger and person following.
         _set_finger_follow(False)
+        _set_person_follow(False)
         return
 
     if action == "follow_finger":
         on = parameters.get("state") == "on"
         print(f"Finger following {'ON' if on else 'OFF'}.")
         _set_finger_follow(on)
+        return
+
+    if action == "follow_me":
+        on = parameters.get("state") == "on"
+        print(f"Person following {'ON' if on else 'OFF'}.")
+        _set_person_follow(on)
         return
 
     if action == "change_hair_color":
@@ -995,6 +1231,15 @@ def execute_robot_command(command: dict):
         lin = DRIVE_SPEED if direction == "forward" else -DRIVE_SPEED
         print(f"Driving {direction} for {duration_s:.2f}s.")
         drive_base(lin, 0.0, duration_s)
+        return
+
+    if action == "twirl":
+        do_twirl(parameters.get("rotations", 1), parameters.get("direction", "left"))
+        return
+
+    if action == "dance":
+        print("Dancing!")
+        do_dance()
         return
 
     if action == "look":
@@ -1178,9 +1423,12 @@ IDLE         = "idle"
 CONVERSATION = "conversation"
 DORMANT      = "dormant"   # muted after "bye jessica": listening but silent until addressed
 
-# Phrases that bring Jessica back from DORMANT. "jessica darling" is also her
-# robot-command trigger, so waking with it lets a command run in the same breath.
-WAKE_PHRASES = ("jessica darling", "hello jessica", "hi jessica")
+# Phrases that bring Jessica back from DORMANT. Broader than the command phrases
+# on purpose: a friendly "hi jessica" should un-mute her, even though it won't by
+# itself run a robot command (that still needs "jessica darling"/"hey jessica",
+# enforced separately by _has_command_phrase). Saying a command phrase wakes AND
+# commands in one breath (e.g. "Hey Jessica, turn left").
+WAKE_PHRASES = ("jessica darling", "hey jessica", "hello jessica", "hi jessica")
 
 # Phrases that mute Jessica into DORMANT.
 FAREWELL_PHRASES = ("bye jessica", "goodbye jessica")
@@ -1221,7 +1469,7 @@ def is_correction(text: str) -> bool:
 
 
 def main():
-    global _ros_node, _hair_pub, _cmd_vel_pub, _head_pub, _follow_pub
+    global _ros_node, _hair_pub, _cmd_vel_pub, _head_pub, _follow_pub, _follow_me_pub
     global conversation, _mic_device_id, _actual_sample_rate, _actual_blocksize
 
     if ROS_AVAILABLE:
@@ -1232,9 +1480,14 @@ def main():
         _head_pub    = _ros_node.create_publisher(
             JointTrajectory, "/pan_tilt_controller/joint_trajectory", 10)
         _follow_pub  = _ros_node.create_publisher(Bool, "/jessica/finger_follow/enable", 10)
+        _follow_me_pub = _ros_node.create_publisher(Bool, "/jessica/person_follow/enable", 10)
         # Read the head's real pose (moved by us, the joystick, or finger_follower)
         # so relative gestures base off the true position, not our last command.
         _ros_node.create_subscription(JointState, "/joint_states", _on_joint_states, 10)
+        # General stop gesture (both arms raised, from the stop_gesture node).
+        # Handled here on the spin thread — completely independent of the audio
+        # loop, so it halts moves even while Jessica is recording or speaking.
+        _ros_node.create_subscription(Empty, "/jessica/stop", _on_stop_gesture, 10)
         # The main loop blocks on audio I/O, so spin the node in a background
         # thread — otherwise the /joint_states callback would never fire.
         threading.Thread(target=_spin_ros, args=(_ros_node,), daemon=True).start()
