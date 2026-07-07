@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 // MCP23017 Register addresses (BANK=0 mode)
 #define MCP23017_IODIRA   0x00
@@ -55,6 +57,12 @@ public:
     // Flush shadow registers to hardware
     void flush();
 
+    // Bus lock — recursive, so the public methods (which lock internally)
+    // can be called while held. Hold it across compound operations that
+    // must not interleave, e.g. "set SEL mux, then analogRead".
+    void lock();
+    void unlock();
+
     // Get current shadow register values
     uint8_t getShadowA() const { return _shadowA; }
     uint8_t getShadowB() const { return _shadowB; }
@@ -69,6 +77,7 @@ private:
     uint8_t _pullupB;      // Pullup register B
     TwoWire* _wire;
     bool _initialized;
+    SemaphoreHandle_t _mutex;  // Recursive: guards shadow RMW + I2C access
 };
 
 #endif // MCP23017BUS_H

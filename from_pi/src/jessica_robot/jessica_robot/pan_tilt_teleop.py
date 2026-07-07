@@ -26,8 +26,11 @@ class PanTiltTeleop(Node):
         self.declare_parameters(
             namespace='',
             parameters=[
-                ('pan_axis', 2),
-                ('tilt_axis', 3),
+                # Axes for the pad's X-input mode (kernel "Generic X-Box pad"):
+                # 0=LX 1=LY 2=LT 3=RX 4=RY 5=RT. Never use 2/5 here — triggers
+                # rest at +1.0, which reads as a permanent full-deflection input.
+                ('pan_axis', 3),
+                ('tilt_axis', 4),
                 ('enable_pan', True),
                 ('enable_tilt', True),
                 ('invert_pan', False),

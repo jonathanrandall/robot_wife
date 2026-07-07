@@ -1,0 +1,50 @@
+# Gamepad profile: X-INPUT mode (Zikway 2.4G pad as USB 3537:1040, kernel xpad,
+# "Generic X-Box pad"). Selected automatically by jessica.launch.py, or force
+# with gamepad_mode:=xinput. One file fully describes one pad personality.
+#
+#   axes:    0=LX 1=LY 2=LT 3=RX 4=RY 5=RT 6=DpadX 7=DpadY
+#   buttons: 0=A 1=B 2=X 3=Y 4=LB 5=RB 6=Back 7=Start 8=Logo
+# LT/RT are AXES resting at +1.0 — never map them as inputs or enable buttons.
+#
+# Check which mode the pad is in: ~/jessica_ws/gamepad_mode.sh
+
+joy_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+
+# Driving (teleop_twist_joy): left stick, deadman held to move.
+teleop_node:
+  ros__parameters:
+    axis_linear:
+      x: 1                  # LY
+    scale_linear:
+      x: 0.3
+    scale_linear_turbo:
+      x: 0.6
+
+    axis_angular:
+      yaw: 0                # LX
+    scale_angular:
+      yaw: 1.0
+    scale_angular_turbo:
+      yaw: 2.0
+
+    enable_button: 4        # LB — hold to drive (manual control)
+    enable_turbo_button: 5  # RB — hold instead of LB for turbo speeds
+    require_enable_button: true
+
+# Head (pan_tilt_teleop): right stick.
+pan_tilt_teleop:
+  ros__parameters:
+    pan_axis: 3             # RX
+    tilt_axis: 4            # RY
+
+# Button bridge → /esp32_aux_cmd ("command_name,argument" per button index).
+joy_button_bridge:
+  ros__parameters:
+    button_mappings:
+      0: "center_pan_tilt,0"   # A — recentre Jessica's head
+      1: "estopclear"          # B — clear emergency stop
+      3: "estop"               # Y — emergency stop

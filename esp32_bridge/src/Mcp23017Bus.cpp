@@ -10,12 +10,25 @@ Mcp23017Bus::Mcp23017Bus()
     , _pullupB(0)
     , _wire(&Wire)
     , _initialized(false)
+    , _mutex(nullptr)
 {
+}
+
+void Mcp23017Bus::lock() {
+    if (_mutex) xSemaphoreTakeRecursive(_mutex, portMAX_DELAY);
+}
+
+void Mcp23017Bus::unlock() {
+    if (_mutex) xSemaphoreGiveRecursive(_mutex);
 }
 
 bool Mcp23017Bus::begin(int sda, int scl, uint8_t addr, uint32_t i2cFreq) {
     _addr = addr;
     _wire = &Wire;
+
+    if (!_mutex) {
+        _mutex = xSemaphoreCreateRecursiveMutex();
+    }
 
     // Initialize I2C with specified pins
     _wire->begin(sda, scl);
@@ -58,6 +71,7 @@ void Mcp23017Bus::pinMode(uint8_t pin, uint8_t mode) {
     bool isInput = (mode == INPUT || mode == INPUT_PULLUP);
     bool pullup = (mode == INPUT_PULLUP);
 
+    lock();
     if (pin < 8) {
         // Port A
         if (isInput) {
@@ -88,11 +102,13 @@ void Mcp23017Bus::pinMode(uint8_t pin, uint8_t mode) {
         writeRegister(MCP23017_IODIRB, _dirB);
         writeRegister(MCP23017_GPPUB, _pullupB);
     }
+    unlock();
 }
 
 void Mcp23017Bus::writePin(uint8_t pin, bool value) {
     if (pin > 15) return;
 
+    lock();
     if (pin < 8) {
         // Port A
         if (value) {
@@ -111,6 +127,7 @@ void Mcp23017Bus::writePin(uint8_t pin, bool value) {
         }
         writeRegister(MCP23017_OLATB, _shadowB);
     }
+    unlock();
 }
 
 bool Mcp23017Bus::readPin(uint8_t pin) {
@@ -127,13 +144,17 @@ bool Mcp23017Bus::readPin(uint8_t pin) {
 }
 
 void Mcp23017Bus::writePortA(uint8_t value) {
+    lock();
     _shadowA = value;
     writeRegister(MCP23017_OLATA, _shadowA);
+    unlock();
 }
 
 void Mcp23017Bus::writePortB(uint8_t value) {
+    lock();
     _shadowB = value;
     writeRegister(MCP23017_OLATB, _shadowB);
+    unlock();
 }
 
 uint8_t Mcp23017Bus::readPortA() {
@@ -145,27 +166,33 @@ uint8_t Mcp23017Bus::readPortB() {
 }
 
 void Mcp23017Bus::writeRegister(uint8_t reg, uint8_t value) {
+    lock();
     _wire->beginTransmission(_addr);
     _wire->write(reg);
     _wire->write(value);
     _wire->endTransmission();
+    unlock();
 }
 
 uint8_t Mcp23017Bus::readRegister(uint8_t reg) {
+    lock();
     _wire->beginTransmission(_addr);
     _wire->write(reg);
     _wire->endTransmission();
 
     _wire->requestFrom(_addr, (uint8_t)1);
+    uint8_t value = 0;
     if (_wire->available()) {
-        return _wire->read();
+        value = _wire->read();
     }
-    return 0;
+    unlock();
+    return value;
 }
 
 void Mcp23017Bus::enablePullup(uint8_t pin, bool enable) {
     if (pin > 15) return;
 
+    lock();
     if (pin < 8) {
         if (enable) {
             _pullupA |= (1 << pin);
@@ -182,9 +209,12 @@ void Mcp23017Bus::enablePullup(uint8_t pin, bool enable) {
         }
         writeRegister(MCP23017_GPPUB, _pullupB);
     }
+    unlock();
 }
 
 void Mcp23017Bus::flush() {
+    lock();
     writeRegister(MCP23017_OLATA, _shadowA);
     writeRegister(MCP23017_OLATB, _shadowB);
+    unlock();
 }

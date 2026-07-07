@@ -12,13 +12,15 @@ struct PanTiltConfig {
     float    servoFreqHz = 50.0f;  // Standard servo PWM frequency
 
     // Pulse width limits in microseconds
-    uint16_t pulseMinUs  = 500;    // Pulse at minimum angle
-    uint16_t pulseMaxUs  = 2500;   // Pulse at maximum angle
+    uint16_t panPulseMinUs  = 300;    // Pan pulse at minimum angle (centre = 1200)
+    uint16_t panPulseMaxUs  = 2100;   // Pan pulse at maximum angle
+    uint16_t tiltPulseMinUs = 400;    // Tilt pulse at minimum angle (centre = 1300)
+    uint16_t tiltPulseMaxUs = 2200;   // Tilt pulse at maximum angle
 
     // Angle limits in radians
     float    panMinRad   = -1.5708f;   // -π/2
     float    panMaxRad   =  1.5708f;   // +π/2
-    float    tiltMinRad  = -1.5708f;   // -π/4
+    float    tiltMinRad  = -1.5708f;   // -π/2
     float    tiltMaxRad   =  1.5708f;  // +π/2
 };
 
@@ -43,7 +45,7 @@ public:
     const PanTiltConfig& getConfig() const { return _config; }
 
 private:
-    void writeServo(uint8_t channel, float radians, float minRad, float maxRad);
+    void writeServo(uint8_t channel, float radians, float minRad, float maxRad, uint16_t pulseMinUs, uint16_t pulseMaxUs);
 
     PanTiltConfig           _config;
     Adafruit_PWMServoDriver _pwm;

@@ -134,10 +134,13 @@ uint16_t Motor::readCurrentRaw() {
 }
 
 float Motor::readCurrentAmps() {
-    // Set SEL0/SEL1 for MultiSense current output based on active direction
+    // Set SEL0/SEL1 for MultiSense current output based on active direction.
+    // SEL0/SEL1 are shared across all drivers — hold the bus lock so nobody
+    // re-muxes between the SEL write and the ADC read.
+    _mcp.lock();
     setSEL(_currentDirection);
-
     uint16_t raw = readCurrentRaw();
+    _mcp.unlock();
     // Serial.printf("[CS] GPIO%d raw=%d voltage=%.3fV\n", _pins.csAdcGPIO, raw, (raw / 4095.0f) * 3.3f);
 
     // ESP32-S3 ADC: 12-bit, 0-3.3V with 11dB attenuation
@@ -177,10 +180,12 @@ bool Motor::hasFault() {
 
 MotorFaultCode Motor::faultCode() {
     // VNH7040: fault indicated by MultiSense rising to VsenseH
-    // SEL1=0 is mandatory for fault detection (Table 13)
+    // SEL1=0 is mandatory for fault detection (Table 13).
+    // Shared SEL mux — hold the bus lock across SEL write + ADC read.
+    _mcp.lock();
     setSEL(_currentDirection);
-
     uint16_t raw = analogRead(_pins.csAdcGPIO);
+    _mcp.unlock();
     float voltage = (raw / 4095.0f) * 3.3f;
 
     if (voltage >= _config.faultVoltageThreshold) {

@@ -265,8 +265,13 @@ All STL files and FreeCAD macros are in `3d_prints/`.
 
 ## Security Notes
 
-- WiFi credentials belong only in `esp32_bridge/src/main.cpp` — that file is in the repo with an **empty password field**. Fill it in locally; do not commit credentials.
-- The Whisper and Ollama servers are LAN-only (no authentication). Keep them on a private network.
+This project assumes a **trusted private LAN**. Nothing here should be exposed to the internet.
+
+- **WiFi credentials** belong only in `esp32_bridge/src/main.cpp` — that file is committed with an **empty password field**. Fill it in locally and take care not to commit the change (e.g. `git update-index --skip-worktree esp32_bridge/src/main.cpp`). The git history has been audited and contains no real credentials.
+- **The ESP32 web dashboard has no authentication.** Anyone on the same WiFi network can drive the robot, move the head, trigger the aux output (`/api/fire`), or toggle the e-stop via plain HTTP GET requests. Keep the robot on a private/isolated network (a guest or IoT VLAN is ideal) and never port-forward to it.
+- **The Whisper and Ollama servers are unauthenticated** and `whisper_server.py` binds to `0.0.0.0` (all interfaces). Run them only on machines behind your router's firewall; do not expose ports 8765 or 11434 to the internet.
+- **Server IPs are hardcoded** in `jessica_chatbot.py` (`OLLAMA_URL`, `WHISPER_URL`). These are private LAN addresses, not secrets, but update them to match your own network.
+- No API keys, tokens, or private keys are used anywhere in this project — all AI services (Whisper, Ollama, Piper) run locally.
 
 ---
 

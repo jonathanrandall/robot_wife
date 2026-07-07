@@ -22,12 +22,14 @@ bool PanTiltController::begin() {
 
 void PanTiltController::setPan(float radians) {
     _panRad = constrain(radians, _config.panMinRad, _config.panMaxRad);
-    writeServo(_config.panChannel, _panRad, _config.panMinRad, _config.panMaxRad);
+    writeServo(_config.panChannel, _panRad, _config.panMinRad, _config.panMaxRad,
+               _config.panPulseMinUs, _config.panPulseMaxUs);
 }
 
 void PanTiltController::setTilt(float radians) {
     _tiltRad = constrain(radians, _config.tiltMinRad, _config.tiltMaxRad);
-    writeServo(_config.tiltChannel, _tiltRad, _config.tiltMinRad, _config.tiltMaxRad);
+    writeServo(_config.tiltChannel, _tiltRad, _config.tiltMinRad, _config.tiltMaxRad,
+               _config.tiltPulseMinUs, _config.tiltPulseMaxUs);
 }
 
 void PanTiltController::center() {
@@ -35,9 +37,8 @@ void PanTiltController::center() {
     setTilt(0.0f);
 }
 
-void PanTiltController::writeServo(uint8_t channel, float radians, float minRad, float maxRad) {
+void PanTiltController::writeServo(uint8_t channel, float radians, float minRad, float maxRad, uint16_t pulseMinUs, uint16_t pulseMaxUs) {
     float normalised = (radians - minRad) / (maxRad - minRad);  // 0.0 – 1.0
-    uint16_t pulseUs = (uint16_t)(_config.pulseMinUs
-                       + normalised * (_config.pulseMaxUs - _config.pulseMinUs));
+    uint16_t pulseUs = (uint16_t)(pulseMinUs + normalised * (pulseMaxUs - pulseMinUs));
     _pwm.writeMicroseconds(channel, pulseUs);
 }

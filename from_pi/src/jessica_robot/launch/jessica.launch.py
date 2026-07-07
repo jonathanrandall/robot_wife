@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -7,6 +8,7 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     GroupAction,
+    OpaqueFunction,
     RegisterEventHandler,
     TimerAction,
 )
@@ -54,9 +56,7 @@ def generate_launch_description():
 
     xacro_file       = os.path.join(desc_pkg, "description", "jessica.urdf.xacro")
     controllers_yaml = os.path.join(pkg, "config", "jessica_controllers.yaml")
-    joystick_yaml    = os.path.join(pkg, "config", "joystick.yaml")
     twist_mux_yaml   = os.path.join(pkg, "config", "twist_mux.yaml")
-    joy_buttons_yaml = os.path.join(pkg, "config", "joy_button_mappings.yaml")
 
     robot_description = {
         "robot_description": ParameterValue(
@@ -140,24 +140,51 @@ def generate_launch_description():
     )
 
     # ── Joystick: driving + head + button bridge ────────────────────────────
-    joy_node = Node(
-        package="joy", executable="joy_node",
-        parameters=[joystick_yaml], output="screen",
-    )
+    # The 2.4G Zikway pad has two usable personalities with different axis and
+    # button numbering: X-input (USB 3537:1040, xpad driver — the normal one)
+    # and D-input (3537:1041, usbhid). gamepad_mode:=auto (default) sniffs
+    # which driver claimed /dev/input/js0 at launch time and loads the matching
+    # config/gamepad_<mode>.yaml; force with gamepad_mode:=xinput|dinput.
+    # No js0 (dongle unplugged, or the pad's dead third mode 3537:2106) falls
+    # back to the X-input profile. See ~/jessica_ws/gamepad_issues.md.
+    def gamepad_nodes(context):
+        mode = LaunchConfiguration("gamepad_mode").perform(context)
+        if mode == "auto":
+            mode = "xinput"
+            try:
+                out = subprocess.run(
+                    ["udevadm", "info", "-q", "property", "/dev/input/js0"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "ID_USB_DRIVER=xpad" in out.stdout:
+                    mode = "xinput"
+                elif out.returncode == 0 and out.stdout.strip():
+                    mode = "dinput"
+                else:
+                    print("[gamepad] no /dev/input/js0 — defaulting to xinput profile")
+            except Exception as exc:  # detection must never kill the launch
+                print(f"[gamepad] mode detection failed ({exc}) — defaulting to xinput profile")
+        gamepad_yaml = os.path.join(pkg, "config", f"gamepad_{mode}.yaml")
+        print(f"[gamepad] using {mode} profile: {gamepad_yaml}")
+        return [
+            Node(
+                package="joy", executable="joy_node",
+                parameters=[gamepad_yaml], output="screen",
+            ),
+            Node(
+                package="teleop_twist_joy", executable="teleop_node", name="teleop_node",
+                parameters=[gamepad_yaml],
+                remappings=[("/cmd_vel", "/cmd_vel_joy")],
+                output="screen",
+            ),
+            make_pynode("pan_tilt_teleop", parameters=[gamepad_yaml]),
+            Node(
+                package="esp32_combined_hardware", executable="joy_button_bridge",
+                parameters=[gamepad_yaml], output="screen",
+            ),
+        ]
 
-    teleop_drive = Node(
-        package="teleop_twist_joy", executable="teleop_node", name="teleop_node",
-        parameters=[joystick_yaml],
-        remappings=[("/cmd_vel", "/cmd_vel_joy")],
-        output="screen",
-    )
-
-    pan_tilt_teleop = make_pynode("pan_tilt_teleop")
-
-    joy_button_bridge = Node(
-        package="esp32_combined_hardware", executable="joy_button_bridge",
-        parameters=[joy_buttons_yaml], output="screen",
-    )
+    joystick_nodes = OpaqueFunction(function=gamepad_nodes)
 
     # ── Velocity mux: manual (joystick) overrides autonomous (chatbot) ──────
     twist_mux = Node(
@@ -214,10 +241,7 @@ def generate_launch_description():
             spawn_diff_cont,
             spawn_pan_tilt,
             home_head_on_start,
-            joy_node,
-            teleop_drive,
-            pan_tilt_teleop,
-            joy_button_bridge,
+            joystick_nodes,
             twist_mux,
             twist_stamper,
             finger_follower,
@@ -236,6 +260,11 @@ def generate_launch_description():
             "camera",
             default_value="true",
             description="Bring up the USB stereo camera publisher. Set false to skip it.",
+        ),
+        DeclareLaunchArgument(
+            "gamepad_mode",
+            default_value="auto",
+            description="Gamepad profile: auto (detect from driver), xinput, or dinput.",
         ),
         hardware_group,
         webcam_publisher,

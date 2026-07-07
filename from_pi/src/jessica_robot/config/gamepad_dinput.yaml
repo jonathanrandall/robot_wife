@@ -1,0 +1,53 @@
+# Gamepad profile: D-INPUT mode (Zikway 2.4G pad as USB 3537:1041, kernel
+# usbhid, "HID gamepad"). Selected automatically by jessica.launch.py when the
+# pad is NOT on the xpad driver, or force with gamepad_mode:=dinput.
+#
+# VERIFIED by live /joy capture 2026-07-08 (see ~/jessica_ws/gamepad_issues.md
+# for the full recorded table). Standard Linux HID BTN_ ordering:
+#   axes:    0=LX 1=LY 2=RX 3=RY 4=RT 5=LT (triggers rest +1.0) 6/7=Dpad
+#   buttons: 0=A 1=B 3=X 4=Y 6=LB 7=RB 8=LT 9=RT 10=View 11=Menu 12=Logo
+#            (2 and 5 are reserved gaps; triggers are BOTH axes and buttons)
+#
+# Check which mode the pad is in: ~/jessica_ws/gamepad_mode.sh
+
+joy_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.05
+    autorepeat_rate: 20.0
+
+# Driving (teleop_twist_joy): left stick, deadman held to move.
+teleop_node:
+  ros__parameters:
+    axis_linear:
+      x: 1                  # LY
+    scale_linear:
+      x: 0.3
+    scale_linear_turbo:
+      x: 0.6
+
+    axis_angular:
+      yaw: 0                # LX
+    scale_angular:
+      yaw: 1.0
+    scale_angular_turbo:
+      yaw: 2.0
+
+    enable_button: 6        # LB — hold to drive (same physical button as X-mode)
+    enable_turbo_button: 7  # RB — hold instead of LB for turbo speeds
+    require_enable_button: true
+
+# Head (pan_tilt_teleop): right stick.
+pan_tilt_teleop:
+  ros__parameters:
+    pan_axis: 2             # RX
+    tilt_axis: 3            # RY
+
+# Button bridge → /esp32_aux_cmd ("command_name,argument" per button index).
+# Same physical buttons as the X-input profile, D-mode indices (Y is 4 here!).
+joy_button_bridge:
+  ros__parameters:
+    button_mappings:
+      0: "center_pan_tilt,0"   # A — recentre Jessica's head
+      1: "estopclear"          # B — clear emergency stop
+      4: "estop"               # Y — emergency stop

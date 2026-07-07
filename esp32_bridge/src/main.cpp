@@ -5,6 +5,7 @@
 #include "RobotController.h"
 #include "PanTiltController.h"
 #include "WebDashboard.h"
+#include "DebugLog.h"
 
 // ============================================================================
 // CONFIGURATION - Modify these values as needed
@@ -91,6 +92,19 @@ volatile uint32_t lastMotorCommandMs = 0;
 // Auxiliary pin state — shared with WebDashboard for telemetry
 volatile bool g_auxPinHigh = false;
 
+// Emergency stop latch — set by AUX,estop or /api/estop, cleared by
+// AUX,estopclear or /api/estop?state=0. While active, incoming CMD
+// velocity commands are ignored.
+volatile bool g_eStopActive = false;
+
+// Set by the serial watchdog on comms timeout, cleared by the next CMD.
+//
+// Both flags are only *requests*: motorControlTask is the single writer
+// of motor state and performs the disable+brake (and the re-enable when
+// the condition clears). Braking directly from another task/core could
+// be overwritten by an in-flight PID cycle's setDuty() calls.
+volatile bool g_watchdogBrake = false;
+
 
 // Telemetry data (shared between tasks)
 struct TelemetryData {
@@ -109,7 +123,9 @@ struct TelemetryData {
 //   "CMD,lf_vel,lr_vel,rf_vel,rr_vel,pan_pos,tilt_pos\n"
 //       — set per-wheel speeds (cm/s, float) and servo positions (radians)
 //   "AUX,command_name,arg\n"
-//       — auxiliary commands (placeholder)
+//       — auxiliary commands, including:
+//           AUX,estop       — emergency stop: brake + disable motors, ignore CMD until cleared
+//           AUX,estopclear  — clear emergency stop, resume normal CMD control
 //
 // Messages FROM ESP32 → PC (in response to GET):
 //   "STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,pan_pos,tilt_pos\n"
@@ -148,12 +164,17 @@ void processSerialCommand(const String& cmd) {
         float lf_vel, lr_vel, rf_vel, rr_vel, pan_pos, tilt_pos;
         if (sscanf(cmd.c_str(), "CMD,%f,%f,%f,%f,%f,%f",
                    &lf_vel, &lr_vel, &rf_vel, &rr_vel, &pan_pos, &tilt_pos) == 6) {
-            // Convert cm/s to m/s, average per side for left/right differential drive
-            float leftMPS  = (lf_vel + lr_vel) / 2.0f / 100.0f;
-            float rightMPS = (rf_vel + rr_vel) / 2.0f / 100.0f;
-            if (!robot->isEnabled()) robot->enable(true);
-            robot->setWheelSpeeds(leftMPS, rightMPS);
+            // Serial link is alive — feed the watchdog even while e-stopped
             lastMotorCommandMs = millis();
+            g_watchdogBrake = false;
+
+            // Convert cm/s to m/s, average per side for left/right differential drive
+            if (!g_eStopActive) {
+                float leftMPS  = (lf_vel + lr_vel) / 2.0f / 100.0f;
+                float rightMPS = (rf_vel + rr_vel) / 2.0f / 100.0f;
+                if (!robot->isEnabled()) robot->enable(true);
+                robot->setWheelSpeeds(leftMPS, rightMPS);
+            }
 
             if (panTilt) {
                 panTilt->setPan(pan_pos);
@@ -190,6 +211,10 @@ void processSerialCommand(const String& cmd) {
                     });
                 if (t) xTimerStart(t, 0);
             }
+        } else if (command_name == "estop") {
+            g_eStopActive = true;   // motorControlTask performs the disable+brake
+        } else if (command_name == "estopclear") {
+            g_eStopActive = false;  // motorControlTask re-enables when it sees this
         }
     }
 }
@@ -199,11 +224,13 @@ void serialCommandTask(void* parameter) {
     line.reserve(64);
 
     while (true) {
-        // Watchdog: stop motors if no motor command within timeout
+        // Watchdog: request a brake if no CMD within timeout. The brake
+        // itself is performed by motorControlTask (single writer of motor
+        // state); the next CMD clears the flag and resumes normal control.
         uint32_t lastCmd = lastMotorCommandMs;
         if (lastCmd > 0 && (millis() - lastCmd) > SERIAL_WATCHDOG_MS) {
-            lastMotorCommandMs = 0;  // reset to prevent repeated stops
-            robot->stop();
+            lastMotorCommandMs = 0;  // reset to prevent repeated triggers
+            g_watchdogBrake = true;
         }
 
         while (Serial.available()) {
@@ -232,12 +259,30 @@ void motorControlTask(void* parameter) {
 
     Serial.println("[Motor Task] Started");
 
+    bool wasBraked = false;
+
     while (true) {
+        // E-stop / watchdog braking happens here, not in the tasks that
+        // request it, so the brake can never be overwritten by an
+        // in-flight PID cycle. Re-asserted every cycle while active.
+        // update() below is a no-op while disabled, and encoder updates
+        // continue so reported velocities stay live.
+        bool braked = g_eStopActive || g_watchdogBrake;
+        if (braked) {
+            if (robot->isEnabled()) robot->enable(false);
+            robot->brake();
+        } else if (wasBraked) {
+            robot->enable(true);  // resume after estopclear / comms restored
+        }
+        wasBraked = braked;
+
         // Check individual motor faults
         bool fault = false;
         for (int i = 0; i < 4; i++) {
             if (motors[i]->hasFault()) {
-                Serial.printf("[Motor Task] Motor %d FAULT (code %d)\n", i + 1, motors[i]->faultCode());
+                // Runtime print — gated so it can't interleave with STATE
+                // lines on the protocol UART (see DebugLog.h)
+                DBG_PRINTF("[Motor Task] Motor %d FAULT (code %d)\n", i + 1, motors[i]->faultCode());
                 fault = true;
             }
         }

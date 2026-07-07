@@ -24,7 +24,7 @@
        (see frame.xacro header comment for the full list of assumptions -
        flag any of these that don't match the real build). -->
   <xacro:property name="wheel_end_inset" value="0.024"/>  <!-- wheel axle inset from each end of a foot -->
-  <xacro:property name="wheel_side_gap"  value="0.020"/>  <!-- gap from the foot's outer face to the wheel's near edge -->
+  <xacro:property name="wheel_side_gap"  value="0.005"/>  <!-- gap from the foot's outer face to the wheel's near edge -->
   <xacro:property name="leg_from_back"   value="0.072"/>  <!-- leg centerline, measured from the back of the foot -->
   <xacro:property name="cross_bar_from_front" value="0.144"/>  <!-- cross-bar centerline, measured from the front of the feet -->
 

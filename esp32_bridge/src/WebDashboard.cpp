@@ -3,6 +3,7 @@
 
 static constexpr int AUX_PIN = 42;
 extern volatile bool g_auxPinHigh;
+extern volatile bool g_eStopActive;
 
 // HTML Dashboard page
 const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
@@ -168,6 +169,21 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
             text-align: center;
         }
 
+        .estop-row {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+        }
+        .estop-row .btn { font-size: 18px; font-weight: bold; }
+        .estop-banner {
+            display: none;
+            text-align: center;
+            color: #e94560;
+            font-weight: bold;
+            letter-spacing: 0.1em;
+            margin-top: 12px;
+        }
+
         .status { text-align: center; padding: 10px; }
         .status.connected { color: #00ff88; }
         .status.disconnected { color: #e94560; }
@@ -183,6 +199,11 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
                 <div id="enableToggle" class="toggle" onclick="toggleEnable()"></div>
                 <span id="enableLabel">DISABLED</span>
             </div>
+            <div class="estop-row">
+                <button class="btn stop" id="btnEstop">E-STOP</button>
+                <button class="btn" id="btnEstopClear">CLEAR E-STOP</button>
+            </div>
+            <div class="estop-banner" id="estopBanner">E-STOP ACTIVE &mdash; drive commands blocked</div>
         </div>
 
         <div class="panel">
@@ -408,6 +429,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
                     }
 
                     document.getElementById('btnFire').classList.toggle('fire-on', !!data.auxPinHigh);
+                    document.getElementById('estopBanner').style.display = data.estop ? 'block' : 'none';
 
                     document.getElementById('status').textContent = 'Connected';
                     document.getElementById('status').className = 'status connected';
@@ -498,6 +520,13 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
             fetch('/api/fire');
         });
 
+        document.getElementById('btnEstop').addEventListener('click', () => {
+            fetch('/api/estop?state=1');
+        });
+        document.getElementById('btnEstopClear').addEventListener('click', () => {
+            fetch('/api/estop?state=0');
+        });
+
         // Initialize
         updateSpeed();
         setInterval(updateTelemetry, 200);
@@ -558,8 +587,12 @@ void WebDashboard::setupRoutes() {
         request->send(200, "text/html", DASHBOARD_HTML);
     });
 
-    // API: Enable/disable motors
+    // API: Enable/disable motors (refused while e-stopped)
     _server.on("/api/enable", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        if (g_eStopActive) {
+            request->send(409, "text/plain", "ESTOP");
+            return;
+        }
         if (request->hasParam("state")) {
             bool enable = request->getParam("state")->value() == "1";
             _robot.enable(enable);
@@ -576,8 +609,13 @@ void WebDashboard::setupRoutes() {
         request->send(200, "text/plain", "OK");
     });
 
-    // API: Direction command
+    // API: Direction command (refused while e-stopped — even "stop"
+    // would release the brake via setDuty(0))
     _server.on("/api/cmd", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        if (g_eStopActive) {
+            request->send(409, "text/plain", "ESTOP");
+            return;
+        }
         if (request->hasParam("dir")) {
             String dir = request->getParam("dir")->value();
             if (dir == "fwd") {
@@ -589,7 +627,10 @@ void WebDashboard::setupRoutes() {
             } else if (dir == "right") {
                 _robot.turnRight(_targetSpeed);
             } else if (dir == "stop") {
-                _robot.stop();
+                // Zero the targets only — the motor task zeroes the duties
+                // on its next cycle. stop() would write duties from this
+                // task, racing the motor task's PID writes.
+                _robot.setSpeed(0, 0);
             }
         }
         request->send(200, "text/plain", "OK");
@@ -622,6 +663,16 @@ void WebDashboard::setupRoutes() {
         request->send(200, "text/plain", "OK");
     });
 
+    // API: Emergency stop latch — state=1 brake + block drive commands,
+    // state=0 clear. Mirrors AUX,estop / AUX,estopclear; the disable+brake
+    // itself is performed by motorControlTask (single writer of motor state).
+    _server.on("/api/estop", HTTP_GET, [](AsyncWebServerRequest* request) {
+        if (request->hasParam("state")) {
+            g_eStopActive = request->getParam("state")->value() == "1";
+        }
+        request->send(200, "text/plain", "OK");
+    });
+
     // API: Get telemetry
     _server.on("/api/telemetry", HTTP_GET, [this](AsyncWebServerRequest* request) {
         request->send(200, "application/json", generateTelemetryJSON());
@@ -634,6 +685,7 @@ String WebDashboard::generateTelemetryJSON() {
     doc["targetSpeed"] = _targetSpeed;
     doc["actualSpeed"] = _robot.getActualLinearSpeed();
     doc["auxPinHigh"]  = (bool)g_auxPinHigh;
+    doc["estop"]       = (bool)g_eStopActive;
 
     // Determine direction from command
     const RobotCommand& cmd = _robot.getCommand();
