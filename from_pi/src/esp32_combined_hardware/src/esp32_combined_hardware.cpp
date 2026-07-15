@@ -51,62 +51,41 @@ hardware_interface::CallbackReturn ESP32CombinedHardware::on_init(
   wheel_radius_ = std::stod(info_.hardware_parameters["wheel_radius"]);  // in cm
   enc_counts_per_rev_ = std::stoi(info_.hardware_parameters["enc_counts_per_rev"]);
 
-  // Expected joints: 4 wheels + 2 servos
-  if (info_.joints.size() != 6)
+  // Expected joints: 4 wheels (servos moved to the separate hiwonder bus
+  // servo controller, see the esp32_servo_hardware package)
+  if (info_.joints.size() != 4)
   {
     RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
-                 "Expected 6 joints, got %zu", info_.joints.size());
+                 "Expected 4 wheel joints, got %zu", info_.joints.size());
     return hardware_interface::CallbackReturn::ERROR;
   }
 
   joint_names_.resize(info_.joints.size());
   hw_positions_.resize(info_.joints.size(), 0.0);
   hw_velocities_.resize(info_.joints.size(), 0.0);
-  hw_commands_velocity_.resize(4, 0.0);   // 4 wheels
-  hw_commands_position_.resize(2, 0.0);   // 2 servos
+  hw_commands_velocity_.resize(4, 0.0);
+  encoder_ok_.fill(true);
+  legacy_firmware_ = false;
 
   for (size_t i = 0; i < info_.joints.size(); i++)
   {
     joint_names_[i] = info_.joints[i].name;
 
-    // Verify wheel joints (0-3) have velocity command and position+velocity state
-    if (i < 4)
+    if (info_.joints[i].command_interfaces.size() != 1 ||
+        info_.joints[i].command_interfaces[0].name != hardware_interface::HW_IF_VELOCITY)
     {
-      if (info_.joints[i].command_interfaces.size() != 1 ||
-          info_.joints[i].command_interfaces[0].name != hardware_interface::HW_IF_VELOCITY)
-      {
-        RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
-                     "Wheel joint %s must have velocity command interface", joint_names_[i].c_str());
-        return hardware_interface::CallbackReturn::ERROR;
-      }
-
-      if (info_.joints[i].state_interfaces.size() != 2 ||
-          info_.joints[i].state_interfaces[0].name != hardware_interface::HW_IF_POSITION ||
-          info_.joints[i].state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
-      {
-        RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
-                     "Wheel joint %s must have position and velocity state interfaces", joint_names_[i].c_str());
-        return hardware_interface::CallbackReturn::ERROR;
-      }
+      RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
+                   "Wheel joint %s must have velocity command interface", joint_names_[i].c_str());
+      return hardware_interface::CallbackReturn::ERROR;
     }
-    // Verify servo joints (4-5) have position command and position state
-    else
-    {
-      if (info_.joints[i].command_interfaces.size() != 1 ||
-          info_.joints[i].command_interfaces[0].name != hardware_interface::HW_IF_POSITION)
-      {
-        RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
-                     "Servo joint %s must have position command interface", joint_names_[i].c_str());
-        return hardware_interface::CallbackReturn::ERROR;
-      }
 
-      if (info_.joints[i].state_interfaces.size() != 1 ||
-          info_.joints[i].state_interfaces[0].name != hardware_interface::HW_IF_POSITION)
-      {
-        RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
-                     "Servo joint %s must have position state interface", joint_names_[i].c_str());
-        return hardware_interface::CallbackReturn::ERROR;
-      }
+    if (info_.joints[i].state_interfaces.size() != 2 ||
+        info_.joints[i].state_interfaces[0].name != hardware_interface::HW_IF_POSITION ||
+        info_.joints[i].state_interfaces[1].name != hardware_interface::HW_IF_VELOCITY)
+    {
+      RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
+                   "Wheel joint %s must have position and velocity state interfaces", joint_names_[i].c_str());
+      return hardware_interface::CallbackReturn::ERROR;
     }
   }
 
@@ -129,13 +108,6 @@ ESP32CombinedHardware::export_state_interfaces()
       joint_names_[i], hardware_interface::HW_IF_VELOCITY, &hw_velocities_[i]));
   }
 
-  // Servo joints (4-5): position only
-  for (size_t i = 4; i < 6; i++)
-  {
-    state_interfaces.emplace_back(hardware_interface::StateInterface(
-      joint_names_[i], hardware_interface::HW_IF_POSITION, &hw_positions_[i]));
-  }
-
   return state_interfaces;
 }
 
@@ -149,13 +121,6 @@ ESP32CombinedHardware::export_command_interfaces()
   {
     command_interfaces.emplace_back(hardware_interface::CommandInterface(
       joint_names_[i], hardware_interface::HW_IF_VELOCITY, &hw_commands_velocity_[i]));
-  }
-
-  // Servo joints (4-5): position command
-  for (size_t i = 4; i < 6; i++)
-  {
-    command_interfaces.emplace_back(hardware_interface::CommandInterface(
-      joint_names_[i], hardware_interface::HW_IF_POSITION, &hw_commands_position_[i - 4]));
   }
 
   return command_interfaces;
@@ -230,10 +195,6 @@ hardware_interface::CallbackReturn ESP32CombinedHardware::on_activate(
   for (size_t i = 0; i < 4; i++)
   {
     hw_commands_velocity_[i] = 0.0;
-  }
-  for (size_t i = 0; i < 2; i++)
-  {
-    hw_commands_position_[i] = 0.0;
   }
 
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -329,9 +290,13 @@ hardware_interface::return_type ESP32CombinedHardware::write(
 
 bool ESP32CombinedHardware::parse_state_message(const std::string & msg)
 {
-  // Expected format: STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,pan_pos,tilt_pos\n
-  // Positions: in encoder counts for wheels, radians for servos
-  // Velocities: in cm/s for wheels
+  // New firmware (12 values):
+  //   STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,lf_ok,lr_ok,rf_ok,rr_ok\n
+  //   positions in encoder counts, velocities in cm/s, ok flags 1/0
+  //   (0 = that wheel's encoder is not working — see ~/jessica_ws/issues.md)
+  // Old firmware (10 values) is accepted too so the robot stays drivable
+  // before the new firmware is flashed:
+  //   STATE,...4 pos...,...4 vel...,pan_pos,tilt_pos\n
 
   std::istringstream iss(msg);
   std::string token;
@@ -355,10 +320,34 @@ bool ESP32CombinedHardware::parse_state_message(const std::string & msg)
     }
   }
 
-  // Need 10 values: 4 positions + 4 velocities + 2 servo positions
-  if (values.size() != 10)
+  if (values.size() != 12 && values.size() != 10)
   {
     return false;
+  }
+
+  if (values.size() == 12)
+  {
+    legacy_firmware_ = false;
+    for (size_t i = 0; i < 4; i++)
+    {
+      bool ok = values[8 + i] != 0.0;
+      if (!ok && encoder_ok_[i])
+      {
+        RCLCPP_ERROR(rclcpp::get_logger("ESP32CombinedHardware"),
+                     "Encoder on %s reported NOT WORKING by firmware", joint_names_[i].c_str());
+      }
+      encoder_ok_[i] = ok;
+    }
+  }
+  else  // 10 values: old firmware (trailing pan/tilt echo, no encoder flags)
+  {
+    if (!legacy_firmware_)
+    {
+      RCLCPP_WARN(rclcpp::get_logger("ESP32CombinedHardware"),
+                  "Old motor firmware detected (10-field STATE, no encoder-health flags). "
+                  "Falling back to 6-field CMD. Flash the new firmware when possible.");
+    }
+    legacy_firmware_ = true;
   }
 
   // Parse wheel positions (encoder counts -> radians)
@@ -376,21 +365,15 @@ bool ESP32CombinedHardware::parse_state_message(const std::string & msg)
   hw_velocities_[2] = values[6] / wheel_radius_;  // right_front
   hw_velocities_[3] = values[7] / wheel_radius_;  // right_rear
 
-  // Servos are open-loop (no encoder feedback): use the last commanded
-  // position as the reported state ("last position moved to"). This keeps
-  // JointTrajectoryController's goal-tolerance checks satisfied. The ESP32's
-  // echoed servo values (values[8], values[9]) are ignored on purpose.
-  hw_positions_[4] = hw_commands_position_[0];   // pan
-  hw_positions_[5] = hw_commands_position_[1];   // tilt
-
   return true;
 }
 
 void ESP32CombinedHardware::send_command_message()
 {
-  // Format: CMD,left_front_vel,left_rear_vel,right_front_vel,right_rear_vel,pan_pos,tilt_pos\n
+  // New firmware: CMD,lf_vel,lr_vel,rf_vel,rr_vel\n (cm/s)
+  // Old firmware requires exactly 6 fields (trailing pan/tilt, now unused),
+  // so in legacy mode two zeros are appended or the firmware drops the CMD.
   // Wheel velocities: convert from rad/s to cm/s (vel_cms = vel_rad_s * radius_cm)
-  // Pan/tilt positions: in radians
 
   double vel_cms[4];
   for (size_t i = 0; i < 4; i++)
@@ -403,10 +386,12 @@ void ESP32CombinedHardware::send_command_message()
       << vel_cms[0] << ","  // left_front_vel (cm/s)
       << vel_cms[1] << ","  // left_rear_vel (cm/s)
       << vel_cms[2] << ","  // right_front_vel (cm/s)
-      << vel_cms[3] << ","  // right_rear_vel (cm/s)
-      << hw_commands_position_[0] << ","  // pan_pos (rad)
-      << hw_commands_position_[1]         // tilt_pos (rad)
-      << "\n";
+      << vel_cms[3];        // right_rear_vel (cm/s)
+  if (legacy_firmware_)
+  {
+    oss << ",0,0";
+  }
+  oss << "\n";
 
   try
   {

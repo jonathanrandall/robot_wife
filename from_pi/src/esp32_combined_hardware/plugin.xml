@@ -3,7 +3,7 @@
          type="esp32_combined_hardware::ESP32CombinedHardware"
          base_class_type="hardware_interface::SystemInterface">
     <description>
-      Combined hardware interface for ESP32 controlling diff drive wheels and pan-tilt servos over serial
+      Hardware interface for the ESP32-S3 motor controller (4 wheels + encoder health) over serial
     </description>
   </class>
 </library>

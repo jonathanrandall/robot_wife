@@ -11,7 +11,7 @@ struct RobotParams {
     float wheelDiameterM = 0.090f;      // Wheel diameter in meters (90mm default)
     float encoderCPR = 537.7f;          // Encoder counts per revolution
     float wheelBaseM = 0.20f;           // Distance between left and right wheels in meters
-    float maxSpeedMPS = 1.5f;           // Maximum speed in meters per second
+    float maxSpeedMPS = 0.8f;           // Maximum speed in meters per second
 };
 
 // PID configuration for speed control
@@ -38,6 +38,13 @@ enum MotorPosition {
 struct RobotCommand {
     float linearSpeed;      // m/s, positive = forward
     float angularSpeed;     // rad/s, positive = turn left
+};
+
+// Per-wheel fault supervision states (encoder plausibility / stall detection)
+enum WheelFaultState : uint8_t {
+    WHEEL_OK    = 0,
+    WHEEL_LIMP  = 1,    // encoder untrusted — wheel driven open-loop (feedforward)
+    WHEEL_STALL = 2     // locked rotor — robot latches braked until cleared
 };
 
 class RobotController {
@@ -95,6 +102,24 @@ public:
     // Enable/disable motors
     void enable(bool en);
     bool isEnabled() const { return _enabled; }
+
+    // Wheel fault supervision — detection runs inside update() (motor task).
+    // A wheel driven hard with no measured motion trips after a debounce:
+    // high current classifies it as a stall (robot latches braked), otherwise
+    // the encoder is untrusted and the wheel limps on feedforward duty only.
+    // Latches persist until clearWheelFaults().
+    bool faultLatched() const;              // any wheel stall-latched → robot must brake
+    bool anyWheelLimp() const;
+    bool wheelOk(int motorIndex) const;     // false while limping or stall-latched
+    void clearWheelFaults();                // manual clear — call from the motor task only
+
+    // Fault detector thresholds — initial values, tune on the bench
+    static constexpr float FAULT_DUTY_THRESHOLD  = 0.3f;   // detector armed above this |duty|
+    static constexpr float FAULT_SPEED_FLOOR_MPS = 0.05f;  // below this the wheel counts as "not moving"
+    static constexpr float FAULT_DEBOUNCE_S      = 0.5f;   // condition must hold this long to trip
+    static constexpr float STALL_CURRENT_A       = 4.0f;   // locked-rotor classification current
+    static constexpr float STALL_DEBOUNCE_S      = 0.2f;   // current-only stall check while limping
+    static constexpr float LIMP_SPEED_SCALE      = 0.5f;   // robot-wide speed cap while limping
 
     // LED control
     void setLEDs(bool red, bool green);
@@ -154,9 +179,18 @@ private:
     float _rightFrontDuty = 0;
     float _rightBackDuty  = 0;
 
+    // Wheel fault supervision state — written only from update() (motor task)
+    volatile uint8_t _wheelFault[4] = {WHEEL_OK, WHEEL_OK, WHEEL_OK, WHEEL_OK};
+    float _faultTimer[4] = {0, 0, 0, 0};
+    float _stallTimer[4] = {0, 0, 0, 0};
+    uint8_t _ledState = 0xFF;   // last state written by updateStatusLEDs(); 0xFF = force first write
+
     void updateWheelCircumference();
     void applyPIDControl(float dt);
     void applyOpenLoopControl();
+    void checkWheelFaults(float dt);
+    void updateStatusLEDs();
+    void capTargetsForLimp(float& leftMPS, float& rightMPS) const;
 };
 
 #endif // ROBOTCONTROLLER_H

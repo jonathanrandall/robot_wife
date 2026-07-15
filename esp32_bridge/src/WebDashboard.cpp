@@ -4,6 +4,13 @@
 static constexpr int AUX_PIN = 42;
 extern volatile bool g_auxPinHigh;
 extern volatile bool g_eStopActive;
+extern volatile bool g_faultClearRequest;
+
+// Servos no longer active — the pan/tilt hardware has been disconnected.
+// The dashboard pan/tilt controls still call /api/pantilt, which lands
+// here and does nothing.
+static void panTiltPlaceholder() {
+}
 
 // HTML Dashboard page
 const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
@@ -247,7 +254,7 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
             <h2>Speed (m/s)</h2>
             <div class="speed-control">
                 <input type="range" id="speedSlider" class="speed-slider" min="0" max="100" value="50" oninput="updateSpeed()">
-                <div class="speed-value"><span id="speedValue">0.50</span> m/s</div>
+                <div class="speed-value"><span id="speedValue">0.40</span> m/s</div>
             </div>
         </div>
 
@@ -339,9 +346,11 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
             document.getElementById('enableLabel').textContent = enabled ? 'ENABLED' : 'DISABLED';
         }
 
+        const MAX_SPEED_MPS = 0.8;  // must match ROBOT_PARAMS.maxSpeedMPS in main.cpp
+
         function updateSpeed() {
             const slider = document.getElementById('speedSlider');
-            speed = (slider.value / 100 ).toFixed(2);
+            speed = (slider.value / 100 * MAX_SPEED_MPS).toFixed(2);
             document.getElementById('speedValue').textContent = speed;
             fetch('/api/speed?value=' + speed);
         }
@@ -535,9 +544,8 @@ const char DASHBOARD_HTML[] PROGMEM = R"rawliteral(
 </html>
 )rawliteral";
 
-WebDashboard::WebDashboard(RobotController& robot, PanTiltController* panTilt, uint16_t port)
+WebDashboard::WebDashboard(RobotController& robot, uint16_t port)
     : _robot(robot)
-    , _panTilt(panTilt)
     , _server(port)
     , _connected(false)
     , _actualSpeed(0)
@@ -637,13 +645,8 @@ void WebDashboard::setupRoutes() {
     });
 
     // API: Pan/tilt position
-    _server.on("/api/pantilt", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        if (_panTilt) {
-            float pan  = request->hasParam("pan")  ? request->getParam("pan")->value().toFloat()  : _panTilt->getPan();
-            float tilt = request->hasParam("tilt") ? request->getParam("tilt")->value().toFloat() : _panTilt->getTilt();
-            _panTilt->setPan(pan);
-            _panTilt->setTilt(tilt);
-        }
+    _server.on("/api/pantilt", HTTP_GET, [](AsyncWebServerRequest* request) {
+        panTiltPlaceholder();
         request->send(200, "text/plain", "OK");
     });
 
@@ -668,7 +671,9 @@ void WebDashboard::setupRoutes() {
     // itself is performed by motorControlTask (single writer of motor state).
     _server.on("/api/estop", HTTP_GET, [](AsyncWebServerRequest* request) {
         if (request->hasParam("state")) {
-            g_eStopActive = request->getParam("state")->value() == "1";
+            bool on = request->getParam("state")->value() == "1";
+            g_eStopActive = on;
+            if (!on) g_faultClearRequest = true;  // CLEAR also resets wheel-fault latches
         }
         request->send(200, "text/plain", "OK");
     });

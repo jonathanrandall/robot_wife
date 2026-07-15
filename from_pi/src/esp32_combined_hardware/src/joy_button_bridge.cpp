@@ -8,6 +8,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joy.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "trajectory_msgs/msg/joint_trajectory.hpp"
 
 class JoyButtonBridge : public rclcpp::Node
 {
@@ -23,6 +24,12 @@ public:
 
     // Publisher for auxiliary commands
     aux_cmd_pub_ = this->create_publisher<std_msgs::msg::String>("/esp32_aux_cmd", 10);
+
+    // The head now lives on its own servo controller (esp32_servo_hardware),
+    // so "center_pan_tilt" can't be an ESP32 aux command anymore: it is
+    // handled here by commanding the pan/tilt controller directly.
+    pan_tilt_pub_ = this->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+      "/pan_tilt_controller/joint_trajectory", 10);
 
     // Initialize button states (assume 10 buttons max)
     previous_button_states_.resize(10, 0);
@@ -116,13 +123,21 @@ private:
         auto it = button_commands_.find(i);
         if (it != button_commands_.end())
         {
-          // Publish the auxiliary command
-          auto aux_msg = std_msgs::msg::String();
-          aux_msg.data = it->second;
-          aux_cmd_pub_->publish(aux_msg);
+          if (it->second.rfind("center_pan_tilt", 0) == 0)
+          {
+            center_pan_tilt();
+            RCLCPP_INFO(this->get_logger(), "Button %zu pressed, centering pan/tilt", i);
+          }
+          else
+          {
+            // Publish the auxiliary command
+            auto aux_msg = std_msgs::msg::String();
+            aux_msg.data = it->second;
+            aux_cmd_pub_->publish(aux_msg);
 
-          RCLCPP_INFO(this->get_logger(), "Button %zu pressed, sending: %s",
-                      i, aux_msg.data.c_str());
+            RCLCPP_INFO(this->get_logger(), "Button %zu pressed, sending: %s",
+                        i, aux_msg.data.c_str());
+          }
         }
       }
 
@@ -131,8 +146,22 @@ private:
     }
   }
 
+  void center_pan_tilt()
+  {
+    // Same home pose as the launch's home_head step (and the chatbot's
+    // HEAD_HOME_PAN/HEAD_HOME_TILT): both joints to 0 over 1 s.
+    trajectory_msgs::msg::JointTrajectory traj;
+    traj.joint_names = {"pan_joint", "tilt_joint"};
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions = {0.0, 0.0};
+    point.time_from_start = rclcpp::Duration::from_seconds(1.0);
+    traj.points.push_back(point);
+    pan_tilt_pub_->publish(traj);
+  }
+
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr aux_cmd_pub_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr pan_tilt_pub_;
 
   std::vector<int> previous_button_states_;
   std::map<size_t, std::string> button_commands_;

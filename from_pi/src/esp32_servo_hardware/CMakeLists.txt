@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(esp32_combined_hardware)
+project(esp32_servo_hardware)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -11,10 +11,6 @@ find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
-find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(trajectory_msgs REQUIRED)
-find_package(pal_statistics REQUIRED)
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(LIBSERIAL REQUIRED libserial)
@@ -23,7 +19,7 @@ pkg_check_modules(LIBSERIAL REQUIRED libserial)
 add_library(
   ${PROJECT_NAME}
   SHARED
-  src/esp32_combined_hardware.cpp
+  src/esp32_servo_hardware.cpp
 )
 
 target_compile_features(${PROJECT_NAME} PUBLIC cxx_std_17)
@@ -39,28 +35,11 @@ ament_target_dependencies(
   pluginlib
   rclcpp
   rclcpp_lifecycle
-  std_msgs
-  pal_statistics
 )
 
 target_link_libraries(${PROJECT_NAME} ${LIBSERIAL_LIBRARIES})
 
 pluginlib_export_plugin_description_file(hardware_interface plugin.xml)
-
-# Joy button bridge node
-add_executable(joy_button_bridge src/joy_button_bridge.cpp)
-target_compile_features(joy_button_bridge PUBLIC cxx_std_17)
-target_include_directories(joy_button_bridge PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-ament_target_dependencies(
-  joy_button_bridge
-  rclcpp
-  sensor_msgs
-  std_msgs
-  trajectory_msgs
-)
 
 # Install
 install(
@@ -75,15 +54,6 @@ install(TARGETS ${PROJECT_NAME}
   RUNTIME DESTINATION bin
 )
 
-install(TARGETS joy_button_bridge
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-install(
-  DIRECTORY config
-  DESTINATION share/${PROJECT_NAME}
-)
-
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   ament_lint_auto_find_test_dependencies()
@@ -95,8 +65,6 @@ ament_export_dependencies(
   pluginlib
   rclcpp
   rclcpp_lifecycle
-  std_msgs
-  pal_statistics
 )
 
 ament_package()

@@ -1,0 +1,9 @@
+<library path="esp32_servo_hardware">
+  <class name="esp32_servo_hardware/ESP32ServoHardware"
+         type="esp32_servo_hardware::ESP32ServoHardware"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Hardware interface for the ESP32 hiwonder bus servo controller (pan/tilt head) over serial
+    </description>
+  </class>
+</library>

@@ -5,7 +5,6 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include "RobotController.h"
-#include "PanTiltController.h"
 
 // WiFi credentials (change these)
 struct WiFiConfig {
@@ -15,7 +14,7 @@ struct WiFiConfig {
 
 class WebDashboard {
 public:
-    WebDashboard(RobotController& robot, PanTiltController* panTilt = nullptr, uint16_t port = 80);
+    WebDashboard(RobotController& robot, uint16_t port = 80);
 
     // Initialize WiFi and web server
     bool begin(const char* ssid, const char* password);
@@ -33,7 +32,6 @@ private:
     String generateTelemetryJSON();
 
     RobotController&   _robot;
-    PanTiltController* _panTilt;
     AsyncWebServer     _server;
     bool               _connected;
 

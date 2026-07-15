@@ -1,3 +1,120 @@
+# Encoder failure detection — analysis 2026-07-13, IMPLEMENTED same day
+
+**Implementation decisions** (details in the analysis below, which was
+written first):
+- Detector + two-tier response in `RobotController` (`checkWheelFaults()`,
+  runs in `update()` on the motor task): trip on |duty| > 0.3 &&
+  |speed| < 5 cm/s for 500ms; current ≥ 4.0A at trip → **stall latch**
+  (robot brakes via the single-writer loop, like e-stop), otherwise →
+  **limp mode** (that wheel feedforward-only, PID skipped; robot keeps
+  driving). Limping wheel keeps a current-only stall check (200ms debounce).
+  Thresholds are constants in RobotController.h — **tune on the bench**.
+- Robot-wide speed cap at 50% while any wheel limps (both sides scaled
+  together to preserve turn geometry).
+- LEDs: stall latch → red; **limp → red+green both on**; else green
+  (enabled) / red (disabled). Reconciled every cycle in
+  `updateStatusLEDs()`, MCP written only on change.
+- STATE gained 4 wheel-health flags (1 = OK, 0 = limping or latched),
+  order lf,lr,rf,rr:
+  `STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,lf_ok,lr_ok,rf_ok,rr_ok`
+  **Pi-side parser (esp32_combined_hardware.cpp) must be updated**, and
+  should exclude flagged wheels from odometry.
+- Manual clear only: `AUX,estopclear` and the dashboard CLEAR E-STOP
+  button set `g_faultClearRequest`; the motor task calls
+  `clearWheelFaults()` (single-writer pattern preserved).
+- `maxSpeedMPS` set to 0.8 (main.cpp + struct default). Other max-speed
+  definitions found and fixed: dashboard slider JS mapped 0–100% → 0–1.0
+  m/s (now × MAX_SPEED_MPS = 0.8, must match main.cpp), and
+  `setWheelSpeeds()` (ROS2 CMD path) never clamped to maxSpeedMPS — an
+  unreachable target winds duty to the clamp just like a dead encoder;
+  now clamped.
+
+**Problem:** if an encoder fails (zero / frozen reading), the PID sees zero
+speed, the error stays at full target value, and `applyPIDControl()` is
+incremental (`duty += correction` every 10ms) — so the duty ratchets straight
+up to the ±1.0 clamp. Full throttle until the target changes to zero.
+
+## What a dead encoder looks like, per signal
+
+Three per-motor signals are already in hand every cycle, plus one more —
+the other three wheels:
+
+| Scenario | Duty (commanded) | Encoder velocity | Motor current |
+|---|---|---|---|
+| Healthy driving | 0.3–1.0 | ≈ duty × 80 cm/s (± hill effects) | normal (load-dependent) |
+| **Encoder dead, motor spinning** | ratchets to max | ~0 or frozen | **normal** |
+| Wheel stalled (against wall, jammed) | ratchets to max | ~0 | **high** (locked rotor) |
+| Motor/wiring dead | ratchets to max | ~0 | **≈ 0** |
+
+Key observation: **the three failure rows don't need to be distinguished to
+act** — in all of them, sustained high duty with near-zero measured speed
+means the control loop has lost the plot, and the safe response is the same
+(brake + disable). Current only matters for *reporting which* failure it was.
+
+## Recommended detector
+
+A per-wheel plausibility check in `motorControlTask` / `RobotController`:
+
+- **Trigger:** `|duty| > 0.3` AND `|measured speed| < ~5 cm/s`,
+  **sustained for ~500ms** (50 control cycles).
+- At duty 0.3 expected speed is ~24 cm/s, so 5 cm/s is far outside any
+  hill/load effect. A hill can slow the robot; it can't hold a wheel at zero
+  while the driver pushes 30% duty — and if something *is* physically holding
+  the wheel (stall), stopping is correct anyway before the motor cooks.
+- The 500ms debounce absorbs spin-up transients and momentary snags.
+- Self-arming: even if the encoder dies while creeping at low duty, PID
+  windup drives the duty up through the 0.3 threshold within a fraction of a
+  second, right into the detection window. No separate low-speed check needed.
+
+**On detection:** set a per-motor fault latch and let the existing
+single-writer machinery brake + disable — same pattern as `g_eStopActive`.
+Current at the moment of trip classifies the cause (≈0 → wiring/driver,
+high → stall, normal → encoder) for reporting.
+
+Two supporting points from the code:
+
+1. **The existing fault path is wrong for this.** The `hasFault()` handling
+   in `motorControlTask` brakes, waits 1s, and *retries*. With a dead encoder
+   that means: brake 1s → PID resumes → winds up → trips again → lurch,
+   forever. An encoder-plausibility fault should **latch** and require an
+   explicit clear (e.g. `AUX,estopclear` also clears it, or a dedicated
+   clear). Open question: after a latched fault, is "dead until cleared"
+   acceptable, or is a degraded open-loop limp mode wanted
+   (`applyOpenLoopControl()` already exists)?
+
+2. **The current reading is nearly free.** `faultCode()` already does a
+   SEL-mux + ADC read per motor every 10ms — the same raw reading converts to
+   amps. So a current-based "motor not drawing anything at duty > threshold"
+   check costs no extra I2C/ADC traffic. Worth adding as a second independent
+   detector: it catches a broken motor wire even when the wheel is dragged by
+   the other three (encoder still turns, so the speed check stays happy).
+
+## Not doing / deferred
+
+- **Cross-checking wheel pairs** (FL vs RL should roughly agree): clever, but
+  skid-steer wheels legitimately slip/scrub during turns, so thresholds get
+  mushy. The duty-vs-speed check alone covers the runaway. Defer.
+- **Direction plausibility** (velocity sign opposite duty sign → miswired
+  encoder): cheap, worth adding at the same time, but second-order.
+- **Partial encoder failure** (one quadrature channel dead → ~half counts):
+  a tight "measured within X% of expected" band would catch it but
+  false-positives on hills. PID compensates by driving faster than
+  commanded — nastier to detect, lower stakes than full runaway. Defer.
+
+## Before coding
+
+- Thresholds (0.3 duty, 5 cm/s, 500ms, current floor) are educated guesses.
+  `maxSpeedMPS` is 1.0 in `ROBOT_PARAMS` but real max is ~80 cm/s, so the
+  duty→speed model is already ~20% off — fine for a loose plausibility bound,
+  but a quick bench capture (duty vs. actual speed vs. current at a few
+  operating points, flat ground) would set them with margin. Could be a
+  temporary `DEBUG_LOG` build.
+- When this trips, ROS2 currently has no way to know — the fault-reporting
+  gap already noted in #4. A latched safety fault that silently ignores CMDs
+  is exactly where an in-protocol status field earns its keep. Worth bundling.
+
+---
+
 # Firmware Issues — code review 2026-07-06
 
 Found during a read-through of the esp32_bridge firmware. No changes made yet.

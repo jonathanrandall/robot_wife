@@ -1,6 +1,7 @@
 #ifndef ESP32_COMBINED_HARDWARE__ESP32_COMBINED_HARDWARE_HPP_
 #define ESP32_COMBINED_HARDWARE__ESP32_COMBINED_HARDWARE_HPP_
 
+#include <array>
 #include <string>
 #include <vector>
 #include <memory>
@@ -67,16 +68,23 @@ private:
   bool aux_command_pending_;
   std::mutex aux_cmd_mutex_;
 
-  // Joint names (4 wheels + 2 servos = 6 joints)
+  // Joint names (4 wheels)
   std::vector<std::string> joint_names_;
 
   // State storage
   std::vector<double> hw_positions_;
   std::vector<double> hw_velocities_;
 
+  // Encoder health flags from the firmware (1 = OK, 0 = encoder fault).
+  // Currently only logged; see ~/jessica_ws/issues.md for planned handling.
+  std::array<bool, 4> encoder_ok_;
+
   // Command storage
-  std::vector<double> hw_commands_velocity_;  // For wheels (indices 0-3)
-  std::vector<double> hw_commands_position_;  // For servos (indices 4-5)
+  std::vector<double> hw_commands_velocity_;
+
+  // True once a 10-field (old firmware) STATE is seen: no encoder flags, and
+  // CMD must carry the two trailing pan/tilt fields or the firmware drops it.
+  bool legacy_firmware_;
 
   // Helper methods
   LibSerial::BaudRate convert_baud_rate(int baud_rate);

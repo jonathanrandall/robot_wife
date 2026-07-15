@@ -3,7 +3,6 @@
 #include "Mcp23017Bus.h"
 #include "Motor.h"
 #include "RobotController.h"
-#include "PanTiltController.h"
 #include "WebDashboard.h"
 #include "DebugLog.h"
 
@@ -23,7 +22,8 @@ const RobotParams ROBOT_PARAMS = {
     0.144f,     // wheelDiameterM: Wheel diameter in meters (90mm)
     1425.0f,     // encoderCPR: Encoder counts per revolution
     0.20f,      // wheelBaseM: Distance between left/right wheels (200mm)
-    1.0f        // maxSpeedMPS: Maximum speed in m/s
+    0.8f        // maxSpeedMPS: Maximum speed in m/s (measured ~80 cm/s;
+                //   must match MAX_SPEED_MPS in the dashboard JS)
 };
 
 // ============================================================================
@@ -78,7 +78,6 @@ constexpr uint32_t SERIAL_WATCHDOG_MS         = 1000;
 Mcp23017Bus mcp;
 Motor* motors[4];
 RobotController*   robot    = nullptr;
-PanTiltController* panTilt  = nullptr;
 WebDashboard*      dashboard = nullptr;
 
 // Task handles
@@ -105,6 +104,11 @@ volatile bool g_eStopActive = false;
 // be overwritten by an in-flight PID cycle's setDuty() calls.
 volatile bool g_watchdogBrake = false;
 
+// Set by AUX,estopclear / the dashboard CLEAR button; motorControlTask
+// resets the wheel-fault latches (limp / stall — see RobotController wheel
+// fault supervision) when it sees this.
+volatile bool g_faultClearRequest = false;
+
 
 // Telemetry data (shared between tasks)
 struct TelemetryData {
@@ -115,21 +119,26 @@ struct TelemetryData {
 } telemetry;
 
 // ============================================================================
-// SERIAL COMMAND PROTOCOL (ROS2 pan/tilt diff drive interface)
+// SERIAL COMMAND PROTOCOL (ROS2 diff drive interface)
 //
 // Messages FROM PC → ESP32 (terminated by \n):
 //   "GET\n"
 //       — request current state; ESP32 responds immediately with STATE message
-//   "CMD,lf_vel,lr_vel,rf_vel,rr_vel,pan_pos,tilt_pos\n"
-//       — set per-wheel speeds (cm/s, float) and servo positions (radians)
+//   "CMD,lf_vel,lr_vel,rf_vel,rr_vel\n"
+//       — set per-wheel speeds (cm/s, float); extra trailing fields are ignored
 //   "AUX,command_name,arg\n"
 //       — auxiliary commands, including:
 //           AUX,estop       — emergency stop: brake + disable motors, ignore CMD until cleared
-//           AUX,estopclear  — clear emergency stop, resume normal CMD control
+//           AUX,estopclear  — clear emergency stop and wheel-fault latches,
+//                             resume normal CMD control
 //
 // Messages FROM ESP32 → PC (in response to GET):
-//   "STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,pan_pos,tilt_pos\n"
-//       — encoder counts (int) and wheel velocities (cm/s, float), servo positions (radians)
+//   "STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,lf_ok,lr_ok,rf_ok,rr_ok\n"
+//       — encoder counts (int), wheel velocities (cm/s, float), and wheel
+//         health flags (1 = OK, 0 = faulted: encoder untrusted/limping or
+//         stall-latched — see RobotController wheel fault supervision).
+//         A faulted wheel's velocity is untrustworthy — exclude it from
+//         odometry.
 //
 // Wheel order: lf=FL(M3), lr=RL(M2), rf=FR(M4), rr=RR(M1)
 // ============================================================================
@@ -147,13 +156,13 @@ void sendStateMessage() {
     float rf_vel = robot->getFrontRightWheelSpeed() * 100.0f;
     float rr_vel = robot->getRearRightWheelSpeed()  * 100.0f;
 
-    float pan_pos  = panTilt ? panTilt->getPan()  : 0.0f;
-    float tilt_pos = panTilt ? panTilt->getTilt() : 0.0f;
-
-    Serial.printf("STATE,%lld,%lld,%lld,%lld,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+    Serial.printf("STATE,%lld,%lld,%lld,%lld,%.2f,%.2f,%.2f,%.2f,%d,%d,%d,%d\n",
                   lf_pos, lr_pos, rf_pos, rr_pos,
                   lf_vel, lr_vel, rf_vel, rr_vel,
-                  pan_pos, tilt_pos);
+                  robot->wheelOk(FRONT_LEFT)  ? 1 : 0,
+                  robot->wheelOk(REAR_LEFT)   ? 1 : 0,
+                  robot->wheelOk(FRONT_RIGHT) ? 1 : 0,
+                  robot->wheelOk(REAR_RIGHT)  ? 1 : 0);
 }
 
 void processSerialCommand(const String& cmd) {
@@ -161,9 +170,9 @@ void processSerialCommand(const String& cmd) {
         sendStateMessage();
     }
     else if (cmd.startsWith("CMD,")) {
-        float lf_vel, lr_vel, rf_vel, rr_vel, pan_pos, tilt_pos;
-        if (sscanf(cmd.c_str(), "CMD,%f,%f,%f,%f,%f,%f",
-                   &lf_vel, &lr_vel, &rf_vel, &rr_vel, &pan_pos, &tilt_pos) == 6) {
+        float lf_vel, lr_vel, rf_vel, rr_vel;
+        if (sscanf(cmd.c_str(), "CMD,%f,%f,%f,%f",
+                   &lf_vel, &lr_vel, &rf_vel, &rr_vel) == 4) {
             // Serial link is alive — feed the watchdog even while e-stopped
             lastMotorCommandMs = millis();
             g_watchdogBrake = false;
@@ -174,11 +183,6 @@ void processSerialCommand(const String& cmd) {
                 float rightMPS = (rf_vel + rr_vel) / 2.0f / 100.0f;
                 if (!robot->isEnabled()) robot->enable(true);
                 robot->setWheelSpeeds(leftMPS, rightMPS);
-            }
-
-            if (panTilt) {
-                panTilt->setPan(pan_pos);
-                panTilt->setTilt(tilt_pos);
             }
         }
     }
@@ -215,6 +219,7 @@ void processSerialCommand(const String& cmd) {
             g_eStopActive = true;   // motorControlTask performs the disable+brake
         } else if (command_name == "estopclear") {
             g_eStopActive = false;  // motorControlTask re-enables when it sees this
+            g_faultClearRequest = true;
         }
     }
 }
@@ -262,12 +267,17 @@ void motorControlTask(void* parameter) {
     bool wasBraked = false;
 
     while (true) {
-        // E-stop / watchdog braking happens here, not in the tasks that
-        // request it, so the brake can never be overwritten by an
+        if (g_faultClearRequest) {
+            g_faultClearRequest = false;
+            robot->clearWheelFaults();
+        }
+
+        // E-stop / watchdog / stall-latch braking happens here, not in the
+        // tasks that request it, so the brake can never be overwritten by an
         // in-flight PID cycle. Re-asserted every cycle while active.
         // update() below is a no-op while disabled, and encoder updates
         // continue so reported velocities stay live.
-        bool braked = g_eStopActive || g_watchdogBrake;
+        bool braked = g_eStopActive || g_watchdogBrake || robot->faultLatched();
         if (braked) {
             if (robot->isEnabled()) robot->enable(false);
             robot->brake();
@@ -386,14 +396,6 @@ void setup() {
     robot->begin();
     Serial.println("Robot controller initialized");
 
-    // Initialize pan/tilt controller (PCA9685 on same I2C bus)
-    panTilt = new PanTiltController();
-    if (!panTilt->begin()) {
-        Serial.println("Pan/tilt init failed — continuing without it");
-        delete panTilt;
-        panTilt = nullptr;
-    }
-
     // Print robot parameters
     Serial.println("\nRobot Parameters:");
     Serial.printf("  Wheel diameter: %.3f m\n", ROBOT_PARAMS.wheelDiameterM);
@@ -403,7 +405,7 @@ void setup() {
 
     // Connect to WiFi and start web server
     Serial.println("\nConnecting to WiFi...");
-    dashboard = new WebDashboard(*robot, panTilt);
+    dashboard = new WebDashboard(*robot);
     if (!dashboard->begin(WIFI_SSID, WIFI_PASSWORD)) {
         Serial.println("WiFi failed - continuing without web dashboard");
     } else {
