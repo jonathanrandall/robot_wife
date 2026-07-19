@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-MODEL_SIZE = os.environ.get("WHISPER_MODEL", "small.en")
+MODEL_SIZE = os.environ.get("WHISPER_MODEL", "medium.en")
 PORT = int(os.environ.get("WHISPER_PORT", 8765))
 
 log.info("Loading Whisper model '%s' (CUDA, float16)...", MODEL_SIZE)

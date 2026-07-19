@@ -1,9 +1,13 @@
 # IDE and editor directories
 .claude/
+
 claude_next_time
 .vscode/
 .idea/
 *.code-workspace
+
+#voices for text to speech
+voices/
 
 # PlatformIO build artifacts
 .pio/
