@@ -56,7 +56,7 @@ from piper.voice import PiperVoice
 
 try:
     import rclpy
-    from std_msgs.msg import Int32, Bool, Empty
+    from std_msgs.msg import Int32, Bool, Empty, String, Float32MultiArray
     from geometry_msgs.msg import Twist
     from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
     from sensor_msgs.msg import JointState
@@ -92,6 +92,8 @@ _cmd_vel_pub = None   # geometry_msgs/Twist  -> /cmd_vel (autonomous channel)
 _head_pub    = None   # trajectory_msgs/JointTrajectory -> /pan_tilt_controller
 _follow_pub  = None   # std_msgs/Bool -> /jessica/finger_follow/enable (finger_follower node)
 _follow_me_pub = None # std_msgs/Bool -> /jessica/person_follow/enable (person_follower node)
+_ui_state_pub  = None # std_msgs/String -> /jessica/ui_state (touchscreen: listening/talking/idle)
+_speech_env_pub = None # std_msgs/Float32MultiArray -> /jessica/speech_env (TTS RMS envelope)
 
 # Head starting pose (rad). MUST match the launch file's home_head trajectory,
 # so the chatbot's relative "look" nudges begin from where the head really is.
@@ -633,6 +635,7 @@ def record_speech(timeout: float | None = None) -> bytes | None:
         print(f"Warning: could not start arecord: {e}")
         return None
 
+    _publish_ui_state("listening")
     chunks: list[np.ndarray] = []
     silence_blocks = 0
     speech_started = False
@@ -671,6 +674,7 @@ def record_speech(timeout: float | None = None) -> bytes | None:
             return _frames_to_wav_bytes(np.concatenate(chunks, axis=0))
         return None
     finally:
+        _publish_ui_state("idle")
         proc.terminate()
         try:
             proc.wait(timeout=1.0)
@@ -735,6 +739,9 @@ def listen_for_speech(timeout: float | None = None) -> str | None:
     wav_bytes = record_speech(timeout=timeout)
     if wav_bytes is None:
         return None
+    # Speech captured — everything until playback (Whisper, LLM, TTS) shows
+    # as "thinking" on the touchscreen. play_wav() switches it to "talking".
+    _publish_ui_state("thinking")
     return transcribe(wav_bytes)
 
 
@@ -911,8 +918,53 @@ def text_to_speech(text: str, wav_path: Path):
         voice.synthesize_wav(text, wav_file)
 
 
+def _publish_ui_state(state: str):
+    """Tell the touchscreen what to show: listening / talking / idle."""
+    if _ui_state_pub is not None:
+        msg = String()
+        msg.data = state
+        _ui_state_pub.publish(msg)
+
+
+ENV_FRAME_S = 0.05   # speech-envelope resolution (50 ms per level)
+
+
+def _publish_speech_envelope(wav_path: Path):
+    """RMS envelope of the TTS wav for the touchscreen soundwaves.
+
+    Published as [frame_seconds, level0, level1, ...] (levels 0..1, peak-
+    normalised per utterance) immediately before playback starts, so the
+    display animates in sync with the audio. Best-effort: a failure here
+    must never block speech.
+    """
+    if _speech_env_pub is None:
+        return
+    try:
+        with wave.open(str(wav_path), "rb") as wf:
+            sr = wf.getframerate()
+            n_ch = wf.getnchannels()
+            samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+        if n_ch > 1:
+            samples = samples.reshape(-1, n_ch).mean(axis=1)
+        frame = max(1, int(sr * ENV_FRAME_S))
+        n = len(samples) // frame
+        if n == 0:
+            return
+        blocks = samples[:n * frame].astype(np.float32).reshape(n, frame)
+        rms = np.sqrt((blocks ** 2).mean(axis=1))
+        peak = rms.max()
+        levels = (rms / peak) if peak > 0 else rms
+        msg = Float32MultiArray()
+        msg.data = [ENV_FRAME_S] + [float(x) for x in levels]
+        _speech_env_pub.publish(msg)
+    except Exception as e:
+        print(f"Warning: speech envelope failed: {e}")
+
+
 def play_wav(wav_path: Path):
     print("\nPlaying Jessica's response...")
+    _publish_speech_envelope(wav_path)
+    _publish_ui_state("talking")
     try:
         subprocess.run(
             ["aplay", "-D", SPEAKER_DEVICE, str(wav_path)],
@@ -920,6 +972,8 @@ def play_wav(wav_path: Path):
         )
     except subprocess.TimeoutExpired:
         print("Warning: aplay timed out — audio device may be stuck.")
+    finally:
+        _publish_ui_state("idle")
     time.sleep(0.5)
 
 
@@ -1470,6 +1524,7 @@ def is_correction(text: str) -> bool:
 
 def main():
     global _ros_node, _hair_pub, _cmd_vel_pub, _head_pub, _follow_pub, _follow_me_pub
+    global _ui_state_pub, _speech_env_pub
     global conversation, _mic_device_id, _actual_sample_rate, _actual_blocksize
 
     if ROS_AVAILABLE:
@@ -1481,6 +1536,8 @@ def main():
             JointTrajectory, "/pan_tilt_controller/joint_trajectory", 10)
         _follow_pub  = _ros_node.create_publisher(Bool, "/jessica/finger_follow/enable", 10)
         _follow_me_pub = _ros_node.create_publisher(Bool, "/jessica/person_follow/enable", 10)
+        _ui_state_pub  = _ros_node.create_publisher(String, "/jessica/ui_state", 10)
+        _speech_env_pub = _ros_node.create_publisher(Float32MultiArray, "/jessica/speech_env", 10)
         # Read the head's real pose (moved by us, the joystick, or finger_follower)
         # so relative gestures base off the true position, not our last command.
         _ros_node.create_subscription(JointState, "/joint_states", _on_joint_states, 10)

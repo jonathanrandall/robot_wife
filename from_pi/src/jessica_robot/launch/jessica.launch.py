@@ -54,6 +54,16 @@ def generate_launch_description():
     # USB device from the ESP32 stack, so it's gated independently of `hardware`.
     camera = LaunchConfiguration("camera")
 
+    # Set tof:=false to skip the front ToF depth camera publisher (CSI Arducam).
+    tof = LaunchConfiguration("tof")
+
+    # Set display:=false to skip the touchscreen UI (Waveshare 7" on HDMI).
+    display = LaunchConfiguration("display")
+
+    # Set chatbot:=false to run without the voice chatbot (drive-only mode:
+    # gamepad + manual topic publishing, mic and speakers untouched).
+    chatbot_enabled = LaunchConfiguration("chatbot")
+
     xacro_file       = os.path.join(desc_pkg, "description", "jessica.urdf.xacro")
     controllers_yaml = os.path.join(pkg, "config", "jessica_controllers.yaml")
     twist_mux_yaml   = os.path.join(pkg, "config", "twist_mux.yaml")
@@ -146,7 +156,7 @@ def generate_launch_description():
     # which driver claimed /dev/input/js0 at launch time and loads the matching
     # config/gamepad_<mode>.yaml; force with gamepad_mode:=xinput|dinput.
     # No js0 (dongle unplugged, or the pad's dead third mode 3537:2106) falls
-    # back to the X-input profile. See ~/jessica_ws/gamepad_issues.md.
+    # back to the X-input profile. See ~/jessica_ws/robot_docs/gamepad_issues.md.
     def gamepad_nodes(context):
         mode = LaunchConfiguration("gamepad_mode").perform(context)
         if mode == "auto":
@@ -210,6 +220,28 @@ def generate_launch_description():
         output="screen", emulate_tty=True,
     )
 
+    # ── Front ToF depth camera → published for the PC ───────────────────────
+    # Feeds /jessica/tof/image/compressed: grayscale depth (255 = 0 mm,
+    # 0 = >= 2 m or no return) for rqt display now, navigation/avoidance later.
+    tof_publisher = Node(
+        package="tof_publisher", executable="tof_publisher",
+        name="tof_publisher",
+        condition=IfCondition(tof),
+        output="screen", emulate_tty=True,
+    )
+
+    # ── Touchscreen UI (Waveshare 7") ───────────────────────────────────────
+    # Renders via KMS/DRM (no desktop). Shows hue-cycling "Listening..." while
+    # recording and speech-synced soundwaves while talking, driven by the
+    # chatbot on /jessica/ui_state + /jessica/speech_env. Touches go out on
+    # /jessica/touch for future on-screen controls.
+    display_node = Node(
+        package="jessica_display", executable="display_node",
+        name="jessica_display",
+        condition=IfCondition(display),
+        output="screen", emulate_tty=True,
+    )
+
     # ── Head tracks a raised fingertip (voice-gated) ────────────────────────
     # Subscribes /jessica/hand_state (from the PC vision) and drives the head.
     # start_enabled=False: comes up idle and only moves once the chatbot enables
@@ -228,7 +260,7 @@ def generate_launch_description():
     stop_gesture = make_pynode("stop_gesture")
 
     # ── Jessica's brain + appearance ────────────────────────────────────────
-    chatbot  = make_pynode("jessica_chatbot")
+    chatbot  = make_pynode("jessica_chatbot", condition=IfCondition(chatbot_enabled))
     hair_led = make_pynode("hair_led_node")
 
     # Everything that needs the ESP32 / joystick, gated behind hardware:=true.
@@ -262,12 +294,29 @@ def generate_launch_description():
             description="Bring up the USB stereo camera publisher. Set false to skip it.",
         ),
         DeclareLaunchArgument(
+            "tof",
+            default_value="true",
+            description="Bring up the front ToF depth camera publisher. Set false to skip it.",
+        ),
+        DeclareLaunchArgument(
+            "display",
+            default_value="true",
+            description="Bring up the touchscreen UI. Set false to skip it.",
+        ),
+        DeclareLaunchArgument(
+            "chatbot",
+            default_value="true",
+            description="Run the voice chatbot. Set false for drive-only mode.",
+        ),
+        DeclareLaunchArgument(
             "gamepad_mode",
             default_value="auto",
             description="Gamepad profile: auto (detect from driver), xinput, or dinput.",
         ),
         hardware_group,
         webcam_publisher,
+        tof_publisher,
+        display_node,
         chatbot,
         hair_led,
     ])

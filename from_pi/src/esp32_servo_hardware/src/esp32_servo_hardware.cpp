@@ -1,11 +1,16 @@
 #include "esp32_servo_hardware/esp32_servo_hardware.hpp"
 
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 #include <thread>
 #include <unordered_map>
+
+#include <sys/ioctl.h>
+#include <termios.h>
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -133,10 +138,30 @@ hardware_interface::CallbackReturn ESP32ServoHardware::on_configure(
     return hardware_interface::CallbackReturn::ERROR;
   }
 
-  // Opening the port resets the board (CH340 DTR line); MicroPython reboots
-  // and drives both servos to their centre position. Wait it out, then throw
-  // the boot chatter away so the line parser starts clean.
-  RCLCPP_INFO(logger(), "Waiting %d ms for the servo board to boot (resets on port open)...",
+  // Force a board reset with an explicit DTR pulse. The ESP32 resets on a DTR
+  // *edge*, not on the port open itself — if DTR never changes state the old
+  // firmware state survives, including a dead one (a stray Ctrl-C byte on the
+  // USB console kills main.py to the REPL, where it sits silent forever; seen
+  // live 2026-07-19). Pulsing guarantees MicroPython boots fresh and homes the
+  // head on every configure.
+  // esptool "hard_reset" sequence — both lines matter on the two-transistor
+  // auto-reset circuit: EN is pulled low only while RTS is asserted AND DTR
+  // is not (and IO0 only in the opposite combination). End with BOTH lines
+  // deasserted: that's the plain "run" state and leaves no line holding EN.
+  {
+    int fd = serial_conn_.GetFileDescriptor();
+    int dtr = TIOCM_DTR, rts = TIOCM_RTS;
+    if (ioctl(fd, TIOCMBIC, &dtr) < 0 ||          // DTR low ...
+        ioctl(fd, TIOCMBIS, &rts) < 0 ||          // ... + RTS high = EN low (reset)
+        (std::this_thread::sleep_for(std::chrono::milliseconds(100)),
+         ioctl(fd, TIOCMBIC, &rts)) < 0)          // both low = EN released, normal boot
+    {
+      RCLCPP_WARN(logger(), "DTR/RTS reset pulse failed (%s) — continuing; the "
+                  "board may keep its previous state", strerror(errno));
+    }
+  }
+
+  RCLCPP_INFO(logger(), "Waiting %d ms for the servo board to boot (DTR reset pulse)...",
               boot_wait_ms_);
   std::this_thread::sleep_for(std::chrono::milliseconds(boot_wait_ms_));
   try

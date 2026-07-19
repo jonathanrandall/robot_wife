@@ -29,7 +29,7 @@ from builtin_interfaces.msg import Duration as DurationMsg
 from rcl_interfaces.msg import SetParametersResult
 from person_state_msgs.msg import HandState
 
-# ── Camera intrinsics (rectified) — from the PC calibration, see documentation.md
+# ── Camera intrinsics (rectified) — from the PC calibration, see robot_docs/documentation.md
 F      = 185.05    # focal length, px
 CX     = 170.0     # principal point x, px
 CY     = 132.6     # principal point y, px

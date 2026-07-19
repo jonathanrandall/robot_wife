@@ -2,7 +2,7 @@
 # usbhid, "HID gamepad"). Selected automatically by jessica.launch.py when the
 # pad is NOT on the xpad driver, or force with gamepad_mode:=dinput.
 #
-# VERIFIED by live /joy capture 2026-07-08 (see ~/jessica_ws/gamepad_issues.md
+# VERIFIED by live /joy capture 2026-07-08 (see ~/jessica_ws/robot_docs/gamepad_issues.md
 # for the full recorded table). Standard Linux HID BTN_ ordering:
 #   axes:    0=LX 1=LY 2=RX 3=RY 4=RT 5=LT (triggers rest +1.0) 6/7=Dpad
 #   buttons: 0=A 1=B 3=X 4=Y 6=LB 7=RB 8=LT 9=RT 10=View 11=Menu 12=Logo

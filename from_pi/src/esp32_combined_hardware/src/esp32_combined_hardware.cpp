@@ -293,7 +293,7 @@ bool ESP32CombinedHardware::parse_state_message(const std::string & msg)
   // New firmware (12 values):
   //   STATE,lf_pos,lr_pos,rf_pos,rr_pos,lf_vel,lr_vel,rf_vel,rr_vel,lf_ok,lr_ok,rf_ok,rr_ok\n
   //   positions in encoder counts, velocities in cm/s, ok flags 1/0
-  //   (0 = that wheel's encoder is not working — see ~/jessica_ws/issues.md)
+  //   (0 = that wheel's encoder is not working — see ~/jessica_ws/robot_docs/issues.md)
   // Old firmware (10 values) is accepted too so the robot stays drivable
   // before the new firmware is flashed:
   //   STATE,...4 pos...,...4 vel...,pan_pos,tilt_pos\n

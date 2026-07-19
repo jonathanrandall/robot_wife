@@ -76,7 +76,7 @@ private:
   std::vector<double> hw_velocities_;
 
   // Encoder health flags from the firmware (1 = OK, 0 = encoder fault).
-  // Currently only logged; see ~/jessica_ws/issues.md for planned handling.
+  // Currently only logged; see ~/jessica_ws/robot_docs/issues.md for planned handling.
   std::array<bool, 4> encoder_ok_;
 
   // Command storage

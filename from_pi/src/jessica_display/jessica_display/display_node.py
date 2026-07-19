@@ -6,7 +6,8 @@ works alongside SSH. pygame comes from the SYSTEM python (apt python3-pygame);
 the pip wheel lacks the KMS/DRM driver.
 
 Subscribes
-  /jessica/ui_state     std_msgs/String        "listening" | "talking" | "idle"
+  /jessica/ui_state     std_msgs/String
+                        "listening" | "thinking" | "talking" | "idle"
   /jessica/speech_env   std_msgs/Float32MultiArray
                         data[0]  = seconds per envelope frame
                         data[1:] = RMS levels 0..1, one per frame, starting when
@@ -16,7 +17,8 @@ Publishes
   /jessica/touch        geometry_msgs/Point    x,y = pixel coords of a touch
 
 Modes
-  listening — big "Listening..." cycling around the hue circle
+  listening — big "Listening..." in warm hues (pink→red→orange→yellow)
+  thinking  — big "Thinking..." in cool hues (green→cyan→blue→indigo)
   talking   — colourful overlapping soundwaves, amplitude = speech envelope
   idle      — dim breathing dot (low frame rate, near-zero CPU)
 """
@@ -62,11 +64,24 @@ WAVE_PARAMS = [
 
 BG = (5, 5, 15)
 
+# Hue windows for the text modes (degrees, 0-360 wheel; end > 360 wraps).
+# Listening: pink→red→orange→yellow. Thinking: green→cyan→blue→indigo.
+LISTENING_HUES = (290, 424)
+THINKING_HUES  = (76, 280)
+HUE_SPEED = 60   # deg/s sweep within the window
+
 
 def hsv_color(h, s=1.0, v=1.0):
     c = pygame.Color(0)
     c.hsva = (h % 360, s * 100, v * 100, 100)
     return c
+
+
+def hue_pingpong(t, lo, hi, speed=HUE_SPEED):
+    """Sweep back and forth inside [lo, hi] — no snap-back at the ends."""
+    span = hi - lo
+    ph = (t * speed) % (2 * span)
+    return (lo + (ph if ph <= span else 2 * span - ph)) % 360
 
 
 class DisplayNode(Node):
@@ -85,7 +100,7 @@ class DisplayNode(Node):
 
     def on_state(self, msg: String):
         state = msg.data.strip().lower()
-        if state in ("listening", "talking", "idle"):
+        if state in ("listening", "thinking", "talking", "idle"):
             if state != self.mode:
                 self.get_logger().info(f"ui_state -> {state}")
             self.mode = state
@@ -132,8 +147,10 @@ def run_display(node: DisplayNode):
     big_font = pygame.font.Font(None, int(h * 0.28))
     # Render the text once in white; per-frame we tint a copy (much cheaper
     # than re-rendering the font every frame).
-    text_white = big_font.render("Listening...", True, (255, 255, 255))
-    text_rect = text_white.get_rect(center=(w // 2, h // 2))
+    listen_white = big_font.render("Listening...", True, (255, 255, 255))
+    listen_rect = listen_white.get_rect(center=(w // 2, h // 2))
+    think_white = big_font.render("Thinking...", True, (255, 255, 255))
+    think_rect = think_white.get_rect(center=(w // 2, h // 2))
 
     xs = list(range(0, w + 8, 8))   # wave sample columns
     smoothed = 0.0                  # displayed level (attack/decay smoothing)
@@ -157,17 +174,23 @@ def run_display(node: DisplayNode):
         screen.fill(BG)
 
         if mode == "listening":
-            hue = (t * 60) % 360                   # full hue circle every 6 s
-            tinted = text_white.copy()
+            hue = hue_pingpong(t, *LISTENING_HUES)
+            tinted = listen_white.copy()
             tinted.fill(hsv_color(hue), special_flags=pygame.BLEND_RGB_MULT)
-            screen.blit(tinted, text_rect)
+            screen.blit(tinted, listen_rect)
+
+        elif mode == "thinking":
+            hue = hue_pingpong(t, *THINKING_HUES)
+            tinted = think_white.copy()
+            tinted.fill(hsv_color(hue), special_flags=pygame.BLEND_RGB_MULT)
+            screen.blit(tinted, think_rect)
 
         elif mode == "talking":
             level = node.current_level()
             rate = 0.6 if level > smoothed else 0.25   # fast attack, slow decay
             smoothed += (level - smoothed) * rate
             for i, (freq, speed, hue0) in enumerate(WAVE_PARAMS):
-                amp = smoothed * h * 0.30 * (1.0 - 0.15 * i)
+                amp = smoothed * h * 0.45 * (1.0 - 0.15 * i)
                 phase = t * speed
                 k = freq * 2 * math.pi / w
                 hue = (hue0 + t * 40) % 360

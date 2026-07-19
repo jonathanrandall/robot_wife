@@ -1,0 +1,29 @@
+# Jessica touchscreen launcher — start menu on boot (headless Pi).
+#
+# Install (one time):
+#   sudo cp ~/jessica_ws/launcher/jessica-launcher.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now jessica-launcher
+#
+# Stop/disable while developing:
+#   sudo systemctl stop jessica-launcher      (long-press already stops the
+#   sudo systemctl disable jessica-launcher    robot stack; this stops the menu)
+
+[Unit]
+Description=Jessica touchscreen launcher (three-button start menu)
+After=multi-user.target systemd-udev-settle.service
+Wants=network-online.target
+
+[Service]
+User=jonny
+Group=jonny
+Environment=HOME=/home/jonny
+WorkingDirectory=/home/jonny/jessica_ws
+ExecStart=/home/jonny/venvs/jazzy/bin/python /home/jonny/jessica_ws/launcher/jessica_launcher.py
+# SIGTERM makes the launcher shut the robot stack down too; give it time.
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
