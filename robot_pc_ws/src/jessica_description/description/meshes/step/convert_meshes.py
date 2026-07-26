@@ -11,6 +11,7 @@ VISUAL_DIR = os.path.join(HERE, "..", "visual")
 
 PARTS = {
     "wheel_120":     "wheel_120.step",
+    "wheel_144":     "wheel_144.step",
     "foot_360":      "foot_360.step",
     "cross_bar_144": "cross_bar_144.step",
     "leg_528":       "leg_528.step",

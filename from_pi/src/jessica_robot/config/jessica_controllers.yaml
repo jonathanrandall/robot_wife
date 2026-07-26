@@ -17,11 +17,11 @@ diff_cont:
     right_wheel_names: ['right_front_wheel_joint', 'right_rear_wheel_joint']
 
     # From the real gobilda build (jessica_description dimensions.xacro):
-    # track = 2 x wheel_sep_y = 2 x 0.156. Skid-steer scrub means the EFFECTIVE
+    # track = 2 x wheel_sep_y = 2 x 0.151. Skid-steer scrub means the EFFECTIVE
     # separation is usually a bit larger — calibrate with the twirl test
     # (command 1 rotation, scale this by actual/commanded rotation).
-    wheel_separation: 0.282  # metres (centre-to-centre, left↔right)
-    wheel_radius:     0.060  # metres (gobilda 3601-0014-0120)
+    wheel_separation: 0.302  # metres (centre-to-centre, left↔right)
+    wheel_radius:     0.072  # metres (gobilda 144mm wheel)
 
     publish_rate: 30.0
     odom_frame_id: odom

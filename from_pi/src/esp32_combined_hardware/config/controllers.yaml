@@ -16,8 +16,8 @@ diff_drive_controller:
     left_wheel_names: ['left_front_wheel_joint', 'left_rear_wheel_joint']
     right_wheel_names: ['right_front_wheel_joint', 'right_rear_wheel_joint']
 
-    wheel_separation: 0.30  # meters (adjust to your robot)
-    wheel_radius: 0.05      # meters (adjust to your robot)
+    wheel_separation: 0.302  # meters (2 x wheel_sep_y from jessica_description dimensions.xacro)
+    wheel_radius: 0.072      # meters (gobilda 144mm wheel)
 
     publish_rate: 50.0
     odom_frame_id: odom

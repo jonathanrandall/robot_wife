@@ -52,7 +52,7 @@ CX     = 170.0     # principal point x, px
 CY     = 132.6     # principal point y, px
 
 # ── Head joint limits (rad) — must match the URDF ros2_control limits.
-PAN_MIN,  PAN_MAX  = -1.57, 1.57
+PAN_MIN,  PAN_MAX  = -2.356, 2.356
 TILT_MIN, TILT_MAX = -1.5,  0.87
 
 # Hand landmark indices (see HandState.msg).

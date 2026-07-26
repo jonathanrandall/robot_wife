@@ -61,7 +61,7 @@
     <child  link="tilt_mount"/>
     <origin xyz="0 0 ${servo_height}" rpy="0 0 0"/>
     <axis xyz="0 0 1"/>
-    <limit lower="-1.57" upper="1.57" effort="5.0" velocity="3.0"/>
+    <limit lower="-2.356" upper="2.356" effort="5.0" velocity="3.0"/>
   </joint>
   <link name="tilt_mount">
     <!-- coupler between the pan servo's output and the tilt servo -->

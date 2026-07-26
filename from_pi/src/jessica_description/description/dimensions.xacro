@@ -2,9 +2,11 @@
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!-- ============ Real hardware dimensions (gobilda parts) ============ -->
-  <!-- gobilda 3601-0014-0120 wheel -->
-  <xacro:property name="wheel_radius" value="0.060"/>
-  <xacro:property name="wheel_width"  value="0.032"/>
+  <!-- gobilda 144mm wheel (meshes/step/wheel_144.step). The previous
+       120mm wheel's files are kept in meshes/ in case we switch back:
+       wheel_120 was radius 0.060, width 0.032. -->
+  <xacro:property name="wheel_radius" value="0.072"/>
+  <xacro:property name="wheel_width"  value="0.052"/>
 
   <!-- gobilda 1120-series U-channel: every frame part below shares this
        48x48mm cross-section, only the length differs. -->

@@ -1,0 +1,413 @@
+# Waveshare display box, built as a real PartDesign model.
+#
+# Model tree created by this macro:
+#
+#   Body "DisplayBox"
+#     Pad    "BlockPad"     <- sketch "OuterSketch"       (XY plane)
+#     Pocket "Cavity"       <- sketch "CavitySketch"      (XY plane, at top)
+#     Pocket "FrontOpening" <- sketch "FrontOpeningSketch"(XZ plane)
+#     Pocket "SideOpenings" <- sketch "SideOpeningSketch" (YZ plane, both sides)
+#     Pad    "InnerWalls"   <- sketch "InnerWallSketch"   (XY plane)
+#     Pad    "MidWall"      <- sketch "MidWallSketch"     (XY plane, on the floor)
+#     Fillet "EdgesFillet"
+#     Pocket "BackHoles"    <- sketch "BackHolesSketch"   (back wall face)
+#
+# Everything is editable afterwards: double-click a sketch to change
+# its geometry (key dimensions have named constraints), double-click
+# a Pad/Pocket to change its length, or edit the fillet radius.
+#
+# Orientation: the box is centered on the origin, the FRONT (long,
+# open side) faces -Y, the base sits on Z = 0, open top faces +Z.
+
+import traceback
+
+import FreeCAD as App
+import Part
+import Sketcher
+
+# ============================================================
+# INITIAL PARAMETERS (used only when the macro first draws the model)
+# ============================================================
+
+INNER_WIDTH = 191.0            # mm, inner size along the long side (X)
+INNER_DEPTH = 22.0             # mm, inner size front-to-back (Y)
+INNER_HEIGHT = 110.0            # mm, inner height above the base (Z)
+WALL = 2.5                     # mm, wall and base thickness
+
+FRONT_OPENING_WIDTH = 157.0    # mm, opening centered in the front wall
+FRONT_PANEL_HEIGHT = 15.0      # mm, solid panel below the front opening
+                               #     (measured from the bottom of the box)
+
+SIDE_OPENING_FROM_FRONT = 3.0  # mm, from the front inner wall
+SIDE_OPENING_WIDTH = 10.0      # mm
+SIDE_PANEL_HEIGHT = 7.0        # mm, solid panel below the side openings
+                               #     (measured from the bottom of the box)
+
+INNER_WALL_FROM_FRONT = 18.0   # mm, front inner wall -> inner wall stubs
+INNER_WALL_LENGTH = 20.0       # mm, how far each stub extends from the side
+INNER_WALL_THICKNESS = 2.5     # mm
+MID_WALL_HEIGHT = 10.0         # mm, low wall between the two stubs
+                               #     (measured from the bottom of the box)
+
+FILLET_RADIUS = 0.5            # mm, slight rounding of all edges.
+                               #     Two facing fillets must fit in the
+                               #     narrowest channel: keep this below
+                               #     half the gap between the inner wall
+                               #     and the back wall.
+
+# Grid of holes in the back wall, centered horizontally.
+HOLE_DIAMETER = 4.2            # mm
+HOLE_SPACING = 8.0             # mm, centre to centre
+HOLE_TOP_ROW_FROM_TOP = 8.0    # mm, top edge of box -> top row centres
+HOLE_ROWS = 9 #3
+HOLE_COLS = 19 #19
+
+DOC_NAME = "Waveshare_Display_Box"
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def show_error(message):
+    App.Console.PrintError(message + "\n")
+    if App.GuiUp:
+        try:
+            from PySide import QtGui
+            QtGui.QMessageBox.critical(None, "FreeCAD Macro Error", message)
+        except Exception:
+            pass
+
+
+def origin_plane(body, role):
+    for feat in body.Origin.OriginFeatures:
+        if getattr(feat, "Role", "") == role or feat.Name.startswith(role):
+            return feat
+    raise RuntimeError("Could not find origin plane " + role)
+
+
+def attach_sketch(body, name, plane_role, offset_z=0.0):
+    sketch = body.newObject("Sketcher::SketchObject", name)
+    plane = origin_plane(body, plane_role)
+    try:
+        sketch.AttachmentSupport = [(plane, "")]
+    except AttributeError:                      # FreeCAD < 1.0
+        sketch.Support = [(plane, "")]
+    sketch.MapMode = "FlatFace"
+    if offset_z:
+        sketch.AttachmentOffset = App.Placement(
+            App.Vector(0, 0, offset_z), App.Rotation())
+    return sketch
+
+
+def hide(feature):
+    if App.GuiUp and feature.ViewObject is not None:
+        feature.ViewObject.Visibility = False
+
+
+def vec(x, y):
+    return App.Vector(x, y, 0.0)
+
+
+Z_NORMAL = App.Vector(0, 0, 1)
+
+
+def add_rect(sketch, x0, y0, x1, y1):
+    """Axis-aligned rectangle with coincident + horizontal/vertical
+    constraints. Returns the four line indices
+    (bottom, right, top, left)."""
+    p = [vec(x0, y0), vec(x1, y0), vec(x1, y1), vec(x0, y1)]
+    ids = [
+        sketch.addGeometry(Part.LineSegment(p[i], p[(i + 1) % 4]), False)
+        for i in range(4)
+    ]
+    for i in range(4):
+        sketch.addConstraint(Sketcher.Constraint(
+            "Coincident", ids[i], 2, ids[(i + 1) % 4], 1))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", ids[0]))
+    sketch.addConstraint(Sketcher.Constraint("Horizontal", ids[2]))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", ids[1]))
+    sketch.addConstraint(Sketcher.Constraint("Vertical", ids[3]))
+    return ids
+
+
+def named(sketch, constraint, name):
+    c = sketch.addConstraint(constraint)
+    sketch.renameConstraint(c, name)
+    return c
+
+
+# ============================================================
+# MODEL
+# ============================================================
+
+def build_model():
+    # Derived dimensions. Box centered on the origin, front at -Y.
+    outer_w = INNER_WIDTH + 2.0 * WALL
+    outer_d = INNER_DEPTH + 2.0 * WALL
+    total_h = WALL + INNER_HEIGHT
+
+    hw, hd = outer_w / 2.0, outer_d / 2.0          # outer half sizes
+    ihw, ihd = INNER_WIDTH / 2.0, INNER_DEPTH / 2.0  # inner half sizes
+
+    front_inner_y = -ihd
+    side_open_y0 = front_inner_y + SIDE_OPENING_FROM_FRONT
+    side_open_y1 = side_open_y0 + SIDE_OPENING_WIDTH
+    stub_y0 = front_inner_y + INNER_WALL_FROM_FRONT
+    stub_y1 = stub_y0 + INNER_WALL_THICKNESS
+    open_hw = FRONT_OPENING_WIDTH / 2.0
+
+    if open_hw >= ihw:
+        raise ValueError("FRONT_OPENING_WIDTH must be smaller than INNER_WIDTH.")
+    if side_open_y1 >= ihd:
+        raise ValueError("The side opening does not fit within INNER_DEPTH.")
+    if stub_y1 >= ihd:
+        raise ValueError("The inner wall does not fit within INNER_DEPTH.")
+    if not WALL <= FRONT_PANEL_HEIGHT < total_h:
+        raise ValueError("FRONT_PANEL_HEIGHT must be between WALL and the "
+                         "total height.")
+    if not WALL <= SIDE_PANEL_HEIGHT < total_h:
+        raise ValueError("SIDE_PANEL_HEIGHT must be between WALL and the "
+                         "total height.")
+    if not WALL < MID_WALL_HEIGHT <= total_h:
+        raise ValueError("MID_WALL_HEIGHT must be between WALL and the "
+                         "total height.")
+
+    # A height safely above the walls, used by cut sketches so the
+    # openings stay open even if the box is later made a bit taller.
+    above = total_h + 10.0
+
+    if DOC_NAME in App.listDocuments():
+        App.closeDocument(DOC_NAME)
+    doc = App.newDocument(DOC_NAME)
+
+    body = doc.addObject("PartDesign::Body", "DisplayBox")
+    body.Label = "DisplayBox"
+
+    # --------------------------------------------------------
+    # 1. Solid outer block
+    # --------------------------------------------------------
+    outer_sk = attach_sketch(body, "OuterSketch", "XY_Plane")
+    r = add_rect(outer_sk, -hw, -hd, hw, hd)
+    outer_sk.addConstraint(Sketcher.Constraint(
+        "Symmetric", r[0], 1, r[1], 2, -1, 1))       # centered on origin
+    named(outer_sk, Sketcher.Constraint("DistanceX", r[0], 1, r[0], 2, outer_w),
+          "OuterWidth")
+    named(outer_sk, Sketcher.Constraint("DistanceY", r[1], 1, r[1], 2, outer_d),
+          "OuterDepth")
+
+    block = body.newObject("PartDesign::Pad", "BlockPad")
+    block.Profile = outer_sk
+    block.Length = total_h
+    hide(outer_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 2. Inner cavity (pocket from the top, leaves the 2 mm base)
+    # --------------------------------------------------------
+    cavity_sk = attach_sketch(body, "CavitySketch", "XY_Plane",
+                              offset_z=total_h)
+    r = add_rect(cavity_sk, -ihw, -ihd, ihw, ihd)
+    cavity_sk.addConstraint(Sketcher.Constraint(
+        "Symmetric", r[0], 1, r[1], 2, -1, 1))
+    named(cavity_sk, Sketcher.Constraint("DistanceX", r[0], 1, r[0], 2,
+                                         INNER_WIDTH), "InnerWidth")
+    named(cavity_sk, Sketcher.Constraint("DistanceY", r[1], 1, r[1], 2,
+                                         INNER_DEPTH), "InnerDepth")
+
+    cavity = body.newObject("PartDesign::Pocket", "Cavity")
+    cavity.Profile = cavity_sk
+    cavity.Length = INNER_HEIGHT
+    hide(cavity_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 3. Front opening (above the front panel, centered)
+    # --------------------------------------------------------
+    # Sketch on the XZ plane (local X = global X, local Y = global Z).
+    # The pocket is reversed so it cuts toward -Y, the front. The wall
+    # below FRONT_PANEL_HEIGHT stays solid.
+    front_sk = attach_sketch(body, "FrontOpeningSketch", "XZ_Plane")
+    r = add_rect(front_sk, -open_hw, FRONT_PANEL_HEIGHT, open_hw, above)
+    # Keep the opening centered: a construction point on the vertical
+    # axis is the midpoint of the bottom edge.
+    mid = front_sk.addGeometry(Part.Point(vec(0, FRONT_PANEL_HEIGHT)), True)
+    front_sk.addConstraint(Sketcher.Constraint(
+        "Symmetric", r[0], 1, r[0], 2, mid, 1))
+    front_sk.addConstraint(Sketcher.Constraint("PointOnObject", mid, 1, -2))
+    named(front_sk, Sketcher.Constraint("DistanceX", r[0], 1, r[0], 2,
+                                        FRONT_OPENING_WIDTH),
+          "FrontOpeningWidth")
+    named(front_sk, Sketcher.Constraint("DistanceY", -1, 1, r[0], 1,
+                                        FRONT_PANEL_HEIGHT),
+          "FrontPanelHeight")
+    front_sk.addConstraint(Sketcher.Constraint(
+        "DistanceY", r[1], 1, r[1], 2, above - FRONT_PANEL_HEIGHT))
+
+    front_open = body.newObject("PartDesign::Pocket", "FrontOpening")
+    front_open.Profile = front_sk
+    front_open.Type = "ThroughAll"
+    front_open.Reversed = True
+    hide(front_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 4. Side openings (both short sides at once)
+    # --------------------------------------------------------
+    # Sketch on the YZ plane (local X = global Y, local Y = global Z).
+    # Midplane + ThroughAll cuts through both side walls symmetrically.
+    # The wall below SIDE_PANEL_HEIGHT stays solid.
+    side_sk = attach_sketch(body, "SideOpeningSketch", "YZ_Plane")
+    r = add_rect(side_sk, side_open_y0, SIDE_PANEL_HEIGHT, side_open_y1, above)
+    named(side_sk, Sketcher.Constraint("DistanceX", r[0], 1, r[0], 2,
+                                       SIDE_OPENING_WIDTH),
+          "SideOpeningWidth")
+    # Position relative to the sketch origin (box centre):
+    # front inner wall + SIDE_OPENING_FROM_FRONT.
+    named(side_sk, Sketcher.Constraint("DistanceX", -1, 1, r[0], 1,
+                                       side_open_y0), "SideOpeningStart")
+    named(side_sk, Sketcher.Constraint("DistanceY", -1, 1, r[0], 1,
+                                       SIDE_PANEL_HEIGHT),
+          "SidePanelHeight")
+    side_sk.addConstraint(Sketcher.Constraint(
+        "DistanceY", r[1], 1, r[1], 2, above - SIDE_PANEL_HEIGHT))
+
+    side_open = body.newObject("PartDesign::Pocket", "SideOpenings")
+    side_open.Profile = side_sk
+    side_open.Type = "ThroughAll"
+    side_open.Midplane = True
+    hide(side_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 5. Inner wall stubs (one from each side wall)
+    # --------------------------------------------------------
+    stub_sk = attach_sketch(body, "InnerWallSketch", "XY_Plane")
+    r1 = add_rect(stub_sk, ihw - INNER_WALL_LENGTH, stub_y0, ihw, stub_y1)
+    r2 = add_rect(stub_sk, -ihw, stub_y0, -ihw + INNER_WALL_LENGTH, stub_y1)
+    named(stub_sk, Sketcher.Constraint("DistanceX", r1[0], 1, r1[0], 2,
+                                       INNER_WALL_LENGTH), "InnerWallLength")
+    named(stub_sk, Sketcher.Constraint("DistanceY", r1[1], 1, r1[1], 2,
+                                       INNER_WALL_THICKNESS),
+          "InnerWallThickness")
+    named(stub_sk, Sketcher.Constraint("DistanceY", -1, 1, r1[0], 1, stub_y0),
+          "InnerWallPositionY")
+    named(stub_sk, Sketcher.Constraint("DistanceX", -1, 1, r1[0], 2, ihw),
+          "InnerWallOuterX")
+    # Mirror the second stub about the vertical sketch axis:
+    # inner corners symmetric, then equal width and height.
+    stub_sk.addConstraint(Sketcher.Constraint(
+        "Symmetric", r1[0], 2, r2[0], 1, -2))
+    stub_sk.addConstraint(Sketcher.Constraint("Equal", r1[0], r2[0]))
+    stub_sk.addConstraint(Sketcher.Constraint("Equal", r1[1], r2[1]))
+
+    stubs = body.newObject("PartDesign::Pad", "InnerWalls")
+    stubs.Profile = stub_sk
+    stubs.Length = total_h
+    hide(stub_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 6. Low wall between the stubs
+    # --------------------------------------------------------
+    # Full inner width on the floor; where it overlaps the stubs the
+    # pads simply fuse, so the middle wall reads as one wall that is
+    # full height at the sides and MID_WALL_HEIGHT tall in between.
+    mid_sk = attach_sketch(body, "MidWallSketch", "XY_Plane", offset_z=WALL)
+    r = add_rect(mid_sk, -ihw, stub_y0, ihw, stub_y1)
+    midp = mid_sk.addGeometry(Part.Point(vec(0, stub_y0)), True)
+    mid_sk.addConstraint(Sketcher.Constraint(
+        "Symmetric", r[0], 1, r[0], 2, midp, 1))
+    mid_sk.addConstraint(Sketcher.Constraint("PointOnObject", midp, 1, -2))
+    named(mid_sk, Sketcher.Constraint("DistanceX", r[0], 1, r[0], 2,
+                                      INNER_WIDTH), "MidWallWidth")
+    named(mid_sk, Sketcher.Constraint("DistanceY", -1, 1, r[0], 1, stub_y0),
+          "MidWallPositionY")
+    named(mid_sk, Sketcher.Constraint("DistanceY", r[1], 1, r[1], 2,
+                                      INNER_WALL_THICKNESS),
+          "MidWallThickness")
+
+    mid_wall = body.newObject("PartDesign::Pad", "MidWall")
+    mid_wall.Profile = mid_sk
+    mid_wall.Length = MID_WALL_HEIGHT - WALL
+    hide(mid_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 7. Slightly round all edges
+    # --------------------------------------------------------
+    fillet = body.newObject("PartDesign::Fillet", "EdgesFillet")
+    fillet.Base = (mid_wall, [""])
+    fillet.UseAllEdges = True
+    fillet.Radius = FILLET_RADIUS
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 8. Grid of holes in the back wall
+    # --------------------------------------------------------
+    # Sketch on the outer back face. The grid is centered horizontally;
+    # vertically the top row sits HOLE_TOP_ROW_FROM_TOP below the top
+    # edge and the other rows hang below it. The holes are cut just
+    # through the wall thickness (ThroughAll would tunnel into the base
+    # slab if a row dips below the floor). Cut after the fillet so
+    # drilled holes keep crisp edges.
+    holes_sk = attach_sketch(body, "BackHolesSketch", "XZ_Plane",
+                             offset_z=-hd)
+    grid_w = (HOLE_COLS - 1) * HOLE_SPACING
+    grid_h = (HOLE_ROWS - 1) * HOLE_SPACING
+    z_top_row = total_h - HOLE_TOP_ROW_FROM_TOP
+    if z_top_row - grid_h < HOLE_DIAMETER / 2.0:
+        raise ValueError("The bottom row of back holes falls off the box; "
+                         "fewer HOLE_ROWS or a taller box is needed.")
+    first = None
+    for row in range(HOLE_ROWS):
+        for col in range(HOLE_COLS):
+            cx = -grid_w / 2.0 + col * HOLE_SPACING
+            cz = z_top_row - grid_h + row * HOLE_SPACING
+            g = holes_sk.addGeometry(Part.Circle(
+                vec(cx, cz), Z_NORMAL, HOLE_DIAMETER / 2.0), False)
+            if first is None:
+                first = g
+                named(holes_sk, Sketcher.Constraint(
+                    "Radius", g, HOLE_DIAMETER / 2.0), "HoleRadius")
+            else:
+                holes_sk.addConstraint(Sketcher.Constraint("Equal", first, g))
+
+    back_holes = body.newObject("PartDesign::Pocket", "BackHoles")
+    back_holes.Profile = holes_sk
+    back_holes.Length = WALL + 0.5
+    back_holes.Reversed = True
+    hide(holes_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # Final checks and view
+    # --------------------------------------------------------
+    for feat in (block, cavity, front_open, side_open, stubs, mid_wall,
+                 fillet, back_holes):
+        if feat.Shape.isNull():
+            raise RuntimeError(feat.Name + " produced an empty shape.")
+
+    if not body.Shape.isValid():
+        App.Console.PrintWarning(
+            "The final shape reports as invalid; check the model.\n")
+
+    if App.GuiUp:
+        import FreeCADGui as Gui
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.SendMsgToActiveView("ViewFit")
+
+    App.Console.PrintMessage(
+        "Display box created.\n"
+        "Expand DisplayBox in the tree and double-click any sketch, "
+        "pad or pocket to edit it.\n"
+    )
+    return body
+
+
+try:
+    build_model()
+except Exception:
+    show_error(
+        "The display box macro failed:\n\n" + traceback.format_exc()
+    )

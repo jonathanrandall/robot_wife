@@ -1,0 +1,948 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import Sketcher
+import traceback
+import math
+
+
+# ============================================================
+# USER-EDITABLE PARAMETERS
+# ============================================================
+
+DOCUMENT_NAME = "JessicaHiwonderPanTiltBase"
+
+
+# ============================================================
+# BASE PLATE
+# ============================================================
+
+BASE_WIDTH = 96.0
+BASE_DEPTH = 96.0
+BASE_THICKNESS = 6.0
+
+
+# ============================================================
+# MAIN 70 x 70 MM MOUNTING PATTERN
+# ============================================================
+
+MAIN_MOUNT_HOLE_DIAMETER = 4.2
+
+MAIN_MOUNT_SPACING_X = 70.0
+MAIN_MOUNT_SPACING_Y = 70.0
+
+MAIN_MOUNT_OFFSET_X = 0.0
+MAIN_MOUNT_OFFSET_Y = 0.0
+
+
+# ============================================================
+# VERTICAL SERVO MOUNTING PATTERN
+# ============================================================
+
+SERVO_HOLE_DIAMETER = 2.5
+
+# Servo is upright:
+# 20 mm horizontally and 40 mm vertically.
+SERVO_HOLE_SPACING_X = 18.0
+SERVO_HOLE_SPACING_Y = 40.0
+
+SERVO_PATTERN_OFFSET_X = 0.0
+
+# Automatically position the servo so the upper edge of its
+# upper mounting holes lines up with the lower edge of the
+# upper main mounting holes.
+AUTO_ALIGN_SERVO_TO_TOP_MOUNTING_HOLES = True
+
+# Used only when automatic alignment is disabled.
+SERVO_PATTERN_OFFSET_Y = 12.3
+
+
+# ============================================================
+# SERVO BODY CLEARANCE OPENING
+# ============================================================
+
+SERVO_OPENING_WIDTH = 16.0
+SERVO_OPENING_HEIGHT = 36.0
+
+SERVO_OPENING_OFFSET_X = 0.0
+
+SERVO_OPENING_FOLLOWS_SERVO = True
+SERVO_OPENING_OFFSET_Y = 12.3
+
+
+# ============================================================
+# LEFT AND RIGHT WIRE OPENINGS
+# ============================================================
+
+WIRE_SLOT_WIDTH = 12.0
+WIRE_SLOT_HEIGHT = 18.0
+
+WIRE_SLOT_OVERLAP = 1.0
+WIRE_SLOT_OFFSET_Y_FROM_SERVO = 0.0
+
+
+# ============================================================
+# GOBILDA NECK GRID
+# ============================================================
+
+NECK_GRID_ENABLED = True
+
+NECK_GRID_HOLE_DIAMETER = 4.2
+NECK_GRID_SPACING = 8.0
+
+# Hole centres are this distance from the plate edges.
+NECK_GRID_EDGE_OFFSET = 8.0
+
+# Two rows/columns around each edge.
+NECK_GRID_EDGE_ROWS = 2
+
+# Two additional horizontal rows between the servo and the
+# lower mounting holes.
+INTERNAL_GRID_ROWS_ENABLED = True
+INTERNAL_GRID_ROW_COUNT = 2
+
+# These rows are calculated from the bottom edge:
+#
+# Bottom perimeter rows:
+#   -40 mm and -32 mm
+#
+# Additional internal rows:
+#   -24 mm and -16 mm
+#
+# for a 96 mm deep plate.
+INTERNAL_GRID_START_INDEX_FROM_BOTTOM = 3
+
+# Extra clearance between grid holes and other features.
+GRID_FEATURE_CLEARANCE = 0.8
+
+
+# ============================================================
+# GENERAL
+# ============================================================
+
+CUT_EXTRA_DEPTH = 2.0
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def add_circle(sketch, x, y, diameter):
+    """Add a circular profile to a sketch."""
+
+    radius = diameter / 2.0
+
+    return sketch.addGeometry(
+        Part.Circle(
+            App.Vector(x, y, 0),
+            App.Vector(0, 0, 1),
+            radius
+        ),
+        False
+    )
+
+
+def add_closed_polygon(sketch, points):
+    """Add one closed polygon from a list of (x, y) points."""
+
+    geometry_indices = []
+
+    for index in range(len(points)):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % len(points)]
+
+        geometry_indices.append(
+            sketch.addGeometry(
+                Part.LineSegment(
+                    App.Vector(x1, y1, 0),
+                    App.Vector(x2, y2, 0)
+                ),
+                False
+            )
+        )
+
+    return geometry_indices
+
+
+def add_centered_rectangle(sketch, width, height):
+    """Add a rectangle centred on the sketch origin."""
+
+    half_width = width / 2.0
+    half_height = height / 2.0
+
+    return add_closed_polygon(
+        sketch,
+        [
+            (-half_width, -half_height),
+            (half_width, -half_height),
+            (half_width, half_height),
+            (-half_width, half_height),
+        ]
+    )
+
+
+def add_cross_opening(
+    sketch,
+    centre_x,
+    centre_y,
+    centre_width,
+    centre_height,
+    slot_width,
+    slot_height,
+    slot_overlap
+):
+    """
+    Add one continuous servo and wire clearance opening.
+    """
+
+    centre_half_width = centre_width / 2.0
+    centre_half_height = centre_height / 2.0
+    slot_half_height = slot_height / 2.0
+
+    centre_left_x = centre_x - centre_half_width
+    centre_right_x = centre_x + centre_half_width
+
+    left_outer_x = (
+        centre_left_x
+        - slot_width
+        + slot_overlap
+    )
+
+    right_outer_x = (
+        centre_right_x
+        + slot_width
+        - slot_overlap
+    )
+
+    bottom_y = centre_y - centre_half_height
+    top_y = centre_y + centre_half_height
+
+    slot_bottom_y = centre_y - slot_half_height
+    slot_top_y = centre_y + slot_half_height
+
+    points = [
+        (centre_left_x, bottom_y),
+        (centre_right_x, bottom_y),
+
+        (centre_right_x, slot_bottom_y),
+        (right_outer_x, slot_bottom_y),
+        (right_outer_x, slot_top_y),
+        (centre_right_x, slot_top_y),
+
+        (centre_right_x, top_y),
+        (centre_left_x, top_y),
+
+        (centre_left_x, slot_top_y),
+        (left_outer_x, slot_top_y),
+        (left_outer_x, slot_bottom_y),
+        (centre_left_x, slot_bottom_y),
+    ]
+
+    return add_closed_polygon(sketch, points)
+
+
+def calculate_servo_offset_y():
+    """
+    Position the servo according to the requested edge alignment.
+    """
+
+    upper_main_hole_y = (
+        MAIN_MOUNT_OFFSET_Y
+        + MAIN_MOUNT_SPACING_Y / 2.0
+    )
+
+    bottom_edge_of_upper_main_hole = (
+        upper_main_hole_y
+        - MAIN_MOUNT_HOLE_DIAMETER / 2.0
+    )
+
+    upper_servo_hole_y = (
+        bottom_edge_of_upper_main_hole
+        - SERVO_HOLE_DIAMETER / 2.0
+    )
+
+    return (
+        upper_servo_hole_y
+        - SERVO_HOLE_SPACING_Y / 2.0
+    )
+
+
+def generate_axis_positions(
+    total_size,
+    edge_offset,
+    spacing
+):
+    """
+    Generate positions beginning edge_offset from one edge and
+    continuing at the requested spacing.
+    """
+
+    minimum = -total_size / 2.0 + edge_offset
+    maximum = total_size / 2.0 - edge_offset
+
+    positions = []
+    value = minimum
+
+    while value <= maximum + 0.001:
+        positions.append(round(value, 6))
+        value += spacing
+
+    return positions
+
+
+def circles_overlap(
+    x1,
+    y1,
+    diameter1,
+    x2,
+    y2,
+    diameter2,
+    extra_clearance=0.0
+):
+    """Return True when two circular profiles would overlap."""
+
+    distance = math.hypot(
+        x1 - x2,
+        y1 - y2
+    )
+
+    required_distance = (
+        diameter1 / 2.0
+        + diameter2 / 2.0
+        + extra_clearance
+    )
+
+    return distance < required_distance
+
+
+def point_inside_expanded_rectangle(
+    point_x,
+    point_y,
+    centre_x,
+    centre_y,
+    width,
+    height,
+    expansion
+):
+    """
+    Check whether a hole centre and its clearance area would
+    intersect a rectangle.
+    """
+
+    return (
+        abs(point_x - centre_x)
+        < width / 2.0 + expansion
+        and
+        abs(point_y - centre_y)
+        < height / 2.0 + expansion
+    )
+
+
+def grid_hole_interferes(
+    x,
+    y,
+    servo_holes,
+    main_mount_holes,
+    opening_centre_x,
+    opening_centre_y
+):
+    """
+    Return True when a GoBILDA grid hole would interfere with
+    another feature.
+    """
+
+    for hole_x, hole_y in servo_holes:
+        if circles_overlap(
+            x,
+            y,
+            NECK_GRID_HOLE_DIAMETER,
+            hole_x,
+            hole_y,
+            SERVO_HOLE_DIAMETER,
+            GRID_FEATURE_CLEARANCE
+        ):
+            return True
+
+    for hole_x, hole_y in main_mount_holes:
+        if circles_overlap(
+            x,
+            y,
+            NECK_GRID_HOLE_DIAMETER,
+            hole_x,
+            hole_y,
+            MAIN_MOUNT_HOLE_DIAMETER,
+            GRID_FEATURE_CLEARANCE
+        ):
+            return True
+
+    grid_radius_and_clearance = (
+        NECK_GRID_HOLE_DIAMETER / 2.0
+        + GRID_FEATURE_CLEARANCE
+    )
+
+    # Central vertical servo opening.
+    if point_inside_expanded_rectangle(
+        x,
+        y,
+        opening_centre_x,
+        opening_centre_y,
+        SERVO_OPENING_WIDTH,
+        SERVO_OPENING_HEIGHT,
+        grid_radius_and_clearance
+    ):
+        return True
+
+    # Complete horizontal wire-slot rectangle.
+    total_wire_opening_width = (
+        SERVO_OPENING_WIDTH
+        + 2.0 * (
+            WIRE_SLOT_WIDTH
+            - WIRE_SLOT_OVERLAP
+        )
+    )
+
+    if point_inside_expanded_rectangle(
+        x,
+        y,
+        opening_centre_x,
+        opening_centre_y,
+        total_wire_opening_width,
+        WIRE_SLOT_HEIGHT,
+        grid_radius_and_clearance
+    ):
+        return True
+
+    return False
+
+
+def add_unique_grid_position(
+    position_set,
+    x,
+    y
+):
+    """
+    Store one grid position while avoiding duplicated corner and
+    intersection holes.
+    """
+
+    position_set.add(
+        (
+            round(x, 5),
+            round(y, 5)
+        )
+    )
+
+
+def validate_parameters():
+    """Check the most important parameters."""
+
+    positive_values = {
+        "BASE_WIDTH": BASE_WIDTH,
+        "BASE_DEPTH": BASE_DEPTH,
+        "BASE_THICKNESS": BASE_THICKNESS,
+        "MAIN_MOUNT_HOLE_DIAMETER":
+            MAIN_MOUNT_HOLE_DIAMETER,
+        "MAIN_MOUNT_SPACING_X":
+            MAIN_MOUNT_SPACING_X,
+        "MAIN_MOUNT_SPACING_Y":
+            MAIN_MOUNT_SPACING_Y,
+        "SERVO_HOLE_DIAMETER":
+            SERVO_HOLE_DIAMETER,
+        "SERVO_HOLE_SPACING_X":
+            SERVO_HOLE_SPACING_X,
+        "SERVO_HOLE_SPACING_Y":
+            SERVO_HOLE_SPACING_Y,
+        "SERVO_OPENING_WIDTH":
+            SERVO_OPENING_WIDTH,
+        "SERVO_OPENING_HEIGHT":
+            SERVO_OPENING_HEIGHT,
+        "WIRE_SLOT_WIDTH":
+            WIRE_SLOT_WIDTH,
+        "WIRE_SLOT_HEIGHT":
+            WIRE_SLOT_HEIGHT,
+        "NECK_GRID_HOLE_DIAMETER":
+            NECK_GRID_HOLE_DIAMETER,
+        "NECK_GRID_SPACING":
+            NECK_GRID_SPACING,
+        "NECK_GRID_EDGE_OFFSET":
+            NECK_GRID_EDGE_OFFSET,
+    }
+
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(
+                "{} must be greater than zero.".format(name)
+            )
+
+    if NECK_GRID_EDGE_ROWS < 1:
+        raise ValueError(
+            "NECK_GRID_EDGE_ROWS must be at least 1."
+        )
+
+    if INTERNAL_GRID_ROW_COUNT < 0:
+        raise ValueError(
+            "INTERNAL_GRID_ROW_COUNT cannot be negative."
+        )
+
+
+# ============================================================
+# MAIN MACRO
+# ============================================================
+
+try:
+    print("")
+    print("Starting Hiwonder pan-tilt base macro...")
+
+    validate_parameters()
+
+
+    # ========================================================
+    # CALCULATE SERVO AND OPENING POSITIONS
+    # ========================================================
+
+    if AUTO_ALIGN_SERVO_TO_TOP_MOUNTING_HOLES:
+        servo_centre_y = calculate_servo_offset_y()
+    else:
+        servo_centre_y = SERVO_PATTERN_OFFSET_Y
+
+    servo_centre_x = SERVO_PATTERN_OFFSET_X
+
+    if SERVO_OPENING_FOLLOWS_SERVO:
+        opening_centre_x = servo_centre_x
+        opening_centre_y = (
+            servo_centre_y
+            + WIRE_SLOT_OFFSET_Y_FROM_SERVO
+        )
+    else:
+        opening_centre_x = SERVO_OPENING_OFFSET_X
+        opening_centre_y = SERVO_OPENING_OFFSET_Y
+
+
+    # ========================================================
+    # CREATE DOCUMENT
+    # ========================================================
+
+    if DOCUMENT_NAME in App.listDocuments():
+        App.closeDocument(DOCUMENT_NAME)
+
+    document = App.newDocument(DOCUMENT_NAME)
+
+
+    # ========================================================
+    # CREATE BODY
+    # ========================================================
+
+    body = document.addObject(
+        "PartDesign::Body",
+        "PanTiltBaseBody"
+    )
+
+    body.Label = "Jessica Hiwonder Pan-Tilt Base"
+
+
+    # ========================================================
+    # BASE SKETCH
+    # ========================================================
+
+    base_sketch = body.newObject(
+        "Sketcher::SketchObject",
+        "BaseSketch"
+    )
+
+    base_sketch.Label = "Base Plate Sketch"
+
+    add_centered_rectangle(
+        base_sketch,
+        BASE_WIDTH,
+        BASE_DEPTH
+    )
+
+    document.recompute()
+
+
+    # ========================================================
+    # BASE PAD
+    # ========================================================
+
+    base_pad = body.newObject(
+        "PartDesign::Pad",
+        "BasePad"
+    )
+
+    base_pad.Label = "Base Plate Pad"
+    base_pad.Profile = base_sketch
+    base_pad.Length = BASE_THICKNESS
+    base_pad.Midplane = False
+    base_pad.Reversed = False
+
+    document.recompute()
+
+    if base_pad.Shape.isNull():
+        raise RuntimeError(
+            "FreeCAD could not create the base pad."
+        )
+
+
+    # ========================================================
+    # HOLE AND OPENING SKETCH
+    # ========================================================
+
+    hole_sketch = body.newObject(
+        "Sketcher::SketchObject",
+        "HoleAndOpeningSketch"
+    )
+
+    hole_sketch.Label = (
+        "Mounting Holes, Servo Opening and Neck Grid"
+    )
+
+    hole_sketch.Placement = App.Placement(
+        App.Vector(0, 0, BASE_THICKNESS),
+        App.Rotation()
+    )
+
+    document.recompute()
+
+
+    # ========================================================
+    # MAIN 70 x 70 MM MOUNTING HOLES
+    # ========================================================
+
+    half_main_x = MAIN_MOUNT_SPACING_X / 2.0
+    half_main_y = MAIN_MOUNT_SPACING_Y / 2.0
+
+    main_mount_positions = [
+        (
+            MAIN_MOUNT_OFFSET_X - half_main_x,
+            MAIN_MOUNT_OFFSET_Y - half_main_y
+        ),
+        (
+            MAIN_MOUNT_OFFSET_X + half_main_x,
+            MAIN_MOUNT_OFFSET_Y - half_main_y
+        ),
+        (
+            MAIN_MOUNT_OFFSET_X + half_main_x,
+            MAIN_MOUNT_OFFSET_Y + half_main_y
+        ),
+        (
+            MAIN_MOUNT_OFFSET_X - half_main_x,
+            MAIN_MOUNT_OFFSET_Y + half_main_y
+        ),
+    ]
+
+    for x_position, y_position in main_mount_positions:
+        add_circle(
+            hole_sketch,
+            x_position,
+            y_position,
+            MAIN_MOUNT_HOLE_DIAMETER
+        )
+
+
+    # ========================================================
+    # VERTICAL SERVO HOLES
+    # ========================================================
+
+    half_servo_x = SERVO_HOLE_SPACING_X / 2.0
+    half_servo_y = SERVO_HOLE_SPACING_Y / 2.0
+
+    servo_hole_positions = [
+        (
+            servo_centre_x - half_servo_x,
+            servo_centre_y - half_servo_y
+        ),
+        (
+            servo_centre_x + half_servo_x,
+            servo_centre_y - half_servo_y
+        ),
+        (
+            servo_centre_x + half_servo_x,
+            servo_centre_y + half_servo_y
+        ),
+        (
+            servo_centre_x - half_servo_x,
+            servo_centre_y + half_servo_y
+        ),
+    ]
+
+    for x_position, y_position in servo_hole_positions:
+        add_circle(
+            hole_sketch,
+            x_position,
+            y_position,
+            SERVO_HOLE_DIAMETER
+        )
+
+
+    # ========================================================
+    # SERVO AND WIRE OPENING
+    # ========================================================
+
+    add_cross_opening(
+        sketch=hole_sketch,
+        centre_x=opening_centre_x,
+        centre_y=opening_centre_y,
+        centre_width=SERVO_OPENING_WIDTH,
+        centre_height=SERVO_OPENING_HEIGHT,
+        slot_width=WIRE_SLOT_WIDTH,
+        slot_height=WIRE_SLOT_HEIGHT,
+        slot_overlap=WIRE_SLOT_OVERLAP
+    )
+
+
+    # ========================================================
+    # CREATE PERIMETER AND INTERNAL GOBILDA GRID
+    # ========================================================
+
+    if NECK_GRID_ENABLED:
+
+        grid_positions = set()
+
+        x_grid_positions = generate_axis_positions(
+            BASE_WIDTH,
+            NECK_GRID_EDGE_OFFSET,
+            NECK_GRID_SPACING
+        )
+
+        y_grid_positions = generate_axis_positions(
+            BASE_DEPTH,
+            NECK_GRID_EDGE_OFFSET,
+            NECK_GRID_SPACING
+        )
+
+        half_width = BASE_WIDTH / 2.0
+        half_depth = BASE_DEPTH / 2.0
+
+
+        # ----------------------------------------------------
+        # TWO TOP AND TWO BOTTOM ROWS
+        # ----------------------------------------------------
+
+        for row_index in range(NECK_GRID_EDGE_ROWS):
+
+            top_y = (
+                half_depth
+                - NECK_GRID_EDGE_OFFSET
+                - row_index * NECK_GRID_SPACING
+            )
+
+            bottom_y = (
+                -half_depth
+                + NECK_GRID_EDGE_OFFSET
+                + row_index * NECK_GRID_SPACING
+            )
+
+            for x_position in x_grid_positions:
+                add_unique_grid_position(
+                    grid_positions,
+                    x_position,
+                    top_y
+                )
+
+                add_unique_grid_position(
+                    grid_positions,
+                    x_position,
+                    bottom_y
+                )
+
+
+        # ----------------------------------------------------
+        # TWO LEFT AND TWO RIGHT COLUMNS
+        # ----------------------------------------------------
+
+        for column_index in range(NECK_GRID_EDGE_ROWS):
+
+            left_x = (
+                -half_width
+                + NECK_GRID_EDGE_OFFSET
+                + column_index * NECK_GRID_SPACING
+            )
+
+            right_x = (
+                half_width
+                - NECK_GRID_EDGE_OFFSET
+                - column_index * NECK_GRID_SPACING
+            )
+
+            for y_position in y_grid_positions:
+                add_unique_grid_position(
+                    grid_positions,
+                    left_x,
+                    y_position
+                )
+
+                add_unique_grid_position(
+                    grid_positions,
+                    right_x,
+                    y_position
+                )
+
+
+        # ----------------------------------------------------
+        # TWO ADDITIONAL ROWS BETWEEN SERVO AND LOWER MOUNTS
+        # ----------------------------------------------------
+
+        if INTERNAL_GRID_ROWS_ENABLED:
+
+            for row_index in range(INTERNAL_GRID_ROW_COUNT):
+
+                grid_index = (
+                    INTERNAL_GRID_START_INDEX_FROM_BOTTOM
+                    + row_index
+                )
+
+                internal_y = (
+                    -half_depth
+                    + NECK_GRID_EDGE_OFFSET
+                    + grid_index * NECK_GRID_SPACING
+                )
+
+                for x_position in x_grid_positions:
+                    add_unique_grid_position(
+                        grid_positions,
+                        x_position,
+                        internal_y
+                    )
+
+
+        # ----------------------------------------------------
+        # ADD ONLY NON-INTERFERING GRID HOLES
+        # ----------------------------------------------------
+
+        grid_holes_added = 0
+        grid_holes_skipped = 0
+
+        for x_position, y_position in sorted(
+            grid_positions,
+            key=lambda point: (point[1], point[0])
+        ):
+
+            if grid_hole_interferes(
+                x_position,
+                y_position,
+                servo_hole_positions,
+                main_mount_positions,
+                opening_centre_x,
+                opening_centre_y
+            ):
+                grid_holes_skipped += 1
+                continue
+
+            add_circle(
+                hole_sketch,
+                x_position,
+                y_position,
+                NECK_GRID_HOLE_DIAMETER
+            )
+
+            grid_holes_added += 1
+
+
+    document.recompute()
+
+
+    # ========================================================
+    # THROUGH POCKET
+    # ========================================================
+
+    hole_pocket = body.newObject(
+        "PartDesign::Pocket",
+        "HoleAndOpeningPocket"
+    )
+
+    hole_pocket.Label = (
+        "Mounting Holes and Servo Clearance Pocket"
+    )
+
+    hole_pocket.Profile = hole_sketch
+    hole_pocket.Length = (
+        BASE_THICKNESS + CUT_EXTRA_DEPTH
+    )
+
+    hole_pocket.Reversed = False
+    hole_pocket.Midplane = False
+
+    document.recompute()
+
+    if hole_pocket.Shape.isNull():
+        raise RuntimeError(
+            "FreeCAD could not create the through-pocket."
+        )
+
+
+    # ========================================================
+    # VISIBILITY
+    # ========================================================
+
+    base_sketch.Visibility = False
+    base_pad.Visibility = False
+    hole_sketch.Visibility = False
+    hole_pocket.Visibility = True
+
+    document.recompute()
+
+
+    # ========================================================
+    # VIEW
+    # ========================================================
+
+    if App.GuiUp:
+        Gui.activeDocument().activeView().viewTop()
+        Gui.activeDocument().activeView().fitAll()
+
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    print("")
+    print("Macro completed successfully.")
+    print("")
+
+    print(
+        "Base plate: {:.1f} x {:.1f} x {:.1f} mm".format(
+            BASE_WIDTH,
+            BASE_DEPTH,
+            BASE_THICKNESS
+        )
+    )
+
+    print(
+        "Servo-pattern centre Y: {:.2f} mm".format(
+            servo_centre_y
+        )
+    )
+
+    if NECK_GRID_ENABLED:
+        print(
+            "GoBILDA grid holes added: {}".format(
+                grid_holes_added
+            )
+        )
+
+        print(
+            "Grid holes omitted due to interference: {}".format(
+                grid_holes_skipped
+            )
+        )
+
+
+except Exception as error:
+
+    print("")
+    print("MACRO FAILED")
+    print("Error:", error)
+    print("")
+    print(traceback.format_exc())
+
+    if App.GuiUp:
+        try:
+            from PySide import QtWidgets
+
+            QtWidgets.QMessageBox.critical(
+                None,
+                "Hiwonder Pan-Tilt Base Macro Error",
+                str(error)
+            )
+        except Exception:
+            pass

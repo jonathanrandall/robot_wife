@@ -37,7 +37,7 @@ IMG_CX = 160.0     # EYE_WIDTH  / 2 — keep the fingertip here (visual centre)
 IMG_CY = 120.0     # EYE_HEIGHT / 2
 
 # ── Head joint limits (rad) — must match the URDF ros2_control limits.
-PAN_MIN,  PAN_MAX  = -1.57, 1.57
+PAN_MIN,  PAN_MAX  = -2.356, 2.356
 TILT_MIN, TILT_MAX = -1.5,  0.87
 
 # ── Rest position (matches the chatbot's HEAD_HOME_*).

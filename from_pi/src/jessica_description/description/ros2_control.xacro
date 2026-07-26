@@ -11,7 +11,7 @@
       <param name="baud_rate">115200</param>
       <param name="timeout_ms">25</param>   <!-- MUST be < loop period (33ms@30Hz). ReadLine blocks the RT loop up to this long when the ESP32 doesn't reply. -->
 
-      <param name="wheel_radius">6.0</param>        <!-- cm, used by hardware protocol (gobilda 3601-0014-0120; scales wheel speed + encoder odom) -->
+      <param name="wheel_radius">7.2</param>        <!-- cm, used by hardware protocol (gobilda 144mm wheel; scales wheel speed + encoder odom) -->
       <param name="enc_counts_per_rev">1425</param>
     </hardware>
 
@@ -54,10 +54,11 @@
     </hardware>
 
     <!-- Pan-tilt servos: position command + position state.
-         Firmware clamps to its own limits (pan full range, tilt 220-780 units
-         = ±1.32 rad) on top of these. -->
+         Firmware (temp/micropython_servo_control/config.py) clamps to its
+         own limits on top of these: pan 0-1000 units = ±2.356 rad (full
+         servo range), tilt 220-780 units = ±1.32 rad. -->
     <joint name="pan_joint">
-      <command_interface name="position"><param name="min">-1.57</param><param name="max">1.57</param></command_interface>
+      <command_interface name="position"><param name="min">-2.356</param><param name="max">2.356</param></command_interface>
       <state_interface name="position"/>
     </joint>
     <joint name="tilt_joint">

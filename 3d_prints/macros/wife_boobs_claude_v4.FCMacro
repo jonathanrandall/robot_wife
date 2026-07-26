@@ -1,0 +1,453 @@
+# Sliced hemisphere bowl, built as a real PartDesign model.
+#
+# Unlike the scripted-object version, this macro creates a normal
+# editable model tree:
+#
+#   Body "Bowl"
+#     Revolution "BowlShell"   <- sketch "BowlProfile" (XZ plane)
+#     Pocket     "SliceCut"    <- sketch "SliceSketch" (XY plane)
+#     Pad        "FlangePad"   <- sketch "FlangeSketch" (XY plane)
+#     Pocket     "FlangeHoles" <- sketch "HolesSketch" (XY plane)
+#     Pocket     "BottomSlits" <- sketch "SlitSketch" (XY plane, on the base)
+#
+# The bowl has a solid flat bottom (no hole); its size is set by the
+# "FlatBottomRadius" dimension inside the BowlProfile sketch.
+#
+# After running it once, you edit the design like any hand-made model:
+# double-click a sketch to change its geometry, or double-click a
+# Pad/Pocket to change its length/type. The parameters below only
+# control the INITIAL geometry the macro draws.
+
+import math
+import traceback
+
+import FreeCAD as App
+import Part
+import Sketcher
+
+# ============================================================
+# INITIAL PARAMETERS (used only when the macro first draws the model)
+# ============================================================
+
+INNER_DIAMETER = 125.0          # mm
+WALL_THICKNESS = 2.5            # mm
+
+FLAT_BOTTOM_DIAMETER = 40.0     # mm, diameter of the solid flat base
+
+FLANGE_WIDTH = 10.0             # mm, sticks outward from the rim
+FLANGE_THICKNESS = 2.0          # mm
+FLANGE_ARC_FRACTION = 0.75       # fraction of the remaining curved rim
+FLANGE_START_FROM_END = "start" # "start" or "end"
+FLANGE_START_OFFSET_MM = 20.0   # mm along the curved rim
+
+SLICE_FRACTION_ACROSS_DIAMETER = 0.9
+
+HOLE_DIAMETER = 4.2             # mm
+HOLE_SPACING = 6.0              # mm along the flange centreline
+HOLE_CENTER_FROM_OUTER_EDGE = 5.0
+
+# Three parallel slits in the flat bottom, perpendicular to the
+# sliced-off edge, with rounded (semicircular) ends.
+SLIT_WIDTH = 4.2                # mm
+SLIT_SPACING = 8.0              # mm, centre line to centre line
+SLIT_EDGE_CLEARANCE = 4.0       # mm, slit outline -> edge of flat bottom
+
+DOC_NAME = "Sliced_Hemisphere_Bowl"
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def show_error(message):
+    App.Console.PrintError(message + "\n")
+    if App.GuiUp:
+        try:
+            from PySide import QtGui
+            QtGui.QMessageBox.critical(None, "FreeCAD Macro Error", message)
+        except Exception:
+            pass
+
+
+def get_partial_arc_angles(edge_radius, cut_x, arc_fraction,
+                           start_from_end, start_offset_mm):
+    """Angular range of the flange along the remaining curved rim."""
+    if abs(cut_x) >= edge_radius:
+        raise ValueError(
+            "The slice position lies outside the circular rim. "
+            "Reduce SLICE_FRACTION_ACROSS_DIAMETER."
+        )
+    if not (0.0 < arc_fraction <= 1.0):
+        raise ValueError("FLANGE_ARC_FRACTION must be > 0 and <= 1.")
+    if start_offset_mm < 0:
+        raise ValueError("FLANGE_START_OFFSET_MM cannot be negative.")
+
+    theta_start_full = math.acos(cut_x / edge_radius)
+    theta_end_full = 2.0 * math.pi - theta_start_full
+
+    used_angle = (theta_end_full - theta_start_full) * arc_fraction
+    offset_angle = start_offset_mm / edge_radius
+
+    if str(start_from_end).strip().lower() == "start":
+        theta_start = theta_start_full + offset_angle
+        theta_end = min(theta_start + used_angle, theta_end_full)
+    else:
+        theta_end = theta_end_full - offset_angle
+        theta_start = max(theta_end - used_angle, theta_start_full)
+
+    if theta_end <= theta_start:
+        raise ValueError(
+            "FLANGE_START_OFFSET_MM is too large for the remaining rim."
+        )
+    return theta_start, theta_end
+
+
+def origin_plane(body, role):
+    """Return one of the body's origin planes: XY_Plane, XZ_Plane, YZ_Plane."""
+    for feat in body.Origin.OriginFeatures:
+        if getattr(feat, "Role", "") == role or feat.Name.startswith(role):
+            return feat
+    raise RuntimeError("Could not find origin plane " + role)
+
+
+def attach_sketch(body, name, plane_role, offset_z=0.0):
+    sketch = body.newObject("Sketcher::SketchObject", name)
+    plane = origin_plane(body, plane_role)
+    try:
+        sketch.AttachmentSupport = [(plane, "")]
+    except AttributeError:                      # FreeCAD < 1.0
+        sketch.Support = [(plane, "")]
+    sketch.MapMode = "FlatFace"
+    if offset_z:
+        sketch.AttachmentOffset = App.Placement(
+            App.Vector(0, 0, offset_z), App.Rotation())
+    return sketch
+
+
+def hide(feature):
+    if App.GuiUp and feature.ViewObject is not None:
+        feature.ViewObject.Visibility = False
+
+
+def vec(x, y):
+    return App.Vector(x, y, 0.0)
+
+
+Z_NORMAL = App.Vector(0, 0, 1)
+
+
+# ============================================================
+# MODEL
+# ============================================================
+
+def build_model():
+    inner_r = INNER_DIAMETER / 2.0
+    outer_r = inner_r + WALL_THICKNESS
+
+    flange_outer_r = outer_r + FLANGE_WIDTH
+    hole_path_r = flange_outer_r - HOLE_CENTER_FROM_OUTER_EDGE
+    hole_r = HOLE_DIAMETER / 2.0
+
+    # x position of the slicing plane, measured across the inner diameter
+    cut_x = -inner_r + SLICE_FRACTION_ACROSS_DIAMETER * INNER_DIAMETER
+
+    theta_start, theta_end = get_partial_arc_angles(
+        outer_r, cut_x, FLANGE_ARC_FRACTION,
+        FLANGE_START_FROM_END, FLANGE_START_OFFSET_MM
+    )
+
+    if DOC_NAME in App.listDocuments():
+        App.closeDocument(DOC_NAME)
+    doc = App.newDocument(DOC_NAME)
+
+    body = doc.addObject("PartDesign::Body", "Bowl")
+    body.Label = "Bowl"
+
+    # --------------------------------------------------------
+    # 1. Bowl shell with solid flat bottom, revolved 360 degrees
+    # --------------------------------------------------------
+    # Sketch on the XZ plane. Local X = global X, local Y = global Z,
+    # so the bowl hangs below Z = 0 (negative local Y).
+    #
+    # Profile (right half, revolved around the vertical axis):
+    #
+    #   rim line   (inner_r,0) -- (outer_r,0)
+    #   outer arc  down to the flat base edge (flat_r, z_out)
+    #   flat base  outside (z_out) and inside (z_in), wall apart
+    #   inner arc  back up to the rim
+    flat_r = FLAT_BOTTOM_DIAMETER / 2.0
+    if flat_r >= outer_r:
+        raise ValueError(
+            "FLAT_BOTTOM_DIAMETER must be smaller than the outer diameter.")
+    z_out = -math.sqrt(outer_r ** 2 - flat_r ** 2)   # outside of flat base
+    z_in = z_out + WALL_THICKNESS                    # inside of flat base
+    if z_in >= 0.0 or abs(z_in) >= inner_r:
+        raise ValueError(
+            "This combination of FLAT_BOTTOM_DIAMETER and WALL_THICKNESS "
+            "does not fit inside the bowl.")
+    r_in_flat = math.sqrt(inner_r ** 2 - z_in ** 2)
+
+    profile = attach_sketch(body, "BowlProfile", "XZ_Plane")
+
+    outer_circle = Part.Circle(vec(0, 0), Z_NORMAL, outer_r)
+    inner_circle = Part.Circle(vec(0, 0), Z_NORMAL, inner_r)
+
+    ang_out = math.atan2(z_out, flat_r)
+    ang_in = math.atan2(z_in, r_in_flat)
+
+    g_outer = profile.addGeometry(
+        Part.ArcOfCircle(outer_circle, ang_out, 0.0), False)
+    g_inner = profile.addGeometry(
+        Part.ArcOfCircle(inner_circle, ang_in, 0.0), False)
+    g_rim = profile.addGeometry(
+        Part.LineSegment(vec(inner_r, 0), vec(outer_r, 0)), False)
+    g_bo = profile.addGeometry(                       # base, outside
+        Part.LineSegment(vec(0, z_out), vec(flat_r, z_out)), False)
+    g_bi = profile.addGeometry(                       # base, inside
+        Part.LineSegment(vec(0, z_in), vec(r_in_flat, z_in)), False)
+    g_ax = profile.addGeometry(                       # closes on the axis
+        Part.LineSegment(vec(0, z_out), vec(0, z_in)), False)
+
+    # Arc centres on the origin.
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_outer, 3, -1, 1))
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_inner, 3, -1, 1))
+    # Arc top ends on the X axis (vertex 1 = start, 2 = end).
+    profile.addConstraint(Sketcher.Constraint("PointOnObject", g_outer, 2, -1))
+    profile.addConstraint(Sketcher.Constraint("PointOnObject", g_inner, 2, -1))
+    # Rim line joins the two arcs.
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_rim, 1, g_inner, 2))
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_rim, 2, g_outer, 2))
+    # Flat base lines join the arcs and the axis line.
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_bo, 2, g_outer, 1))
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_bi, 2, g_inner, 1))
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_ax, 1, g_bo, 1))
+    profile.addConstraint(Sketcher.Constraint("Coincident", g_ax, 2, g_bi, 1))
+    profile.addConstraint(Sketcher.Constraint("Horizontal", g_bo))
+    profile.addConstraint(Sketcher.Constraint("Horizontal", g_bi))
+    profile.addConstraint(Sketcher.Constraint("PointOnObject", g_bo, 1, -2))
+    profile.addConstraint(Sketcher.Constraint("PointOnObject", g_bi, 1, -2))
+    # Driving dimensions, named so they are easy to find and edit.
+    c = profile.addConstraint(Sketcher.Constraint("Radius", g_outer, outer_r))
+    profile.renameConstraint(c, "OuterRadius")
+    c = profile.addConstraint(Sketcher.Constraint("Radius", g_inner, inner_r))
+    profile.renameConstraint(c, "InnerRadius")
+    c = profile.addConstraint(Sketcher.Constraint(
+        "DistanceX", -1, 1, g_bo, 2, flat_r))
+    profile.renameConstraint(c, "FlatBottomRadius")
+    c = profile.addConstraint(Sketcher.Constraint(
+        "DistanceY", g_bo, 1, g_bi, 1, WALL_THICKNESS))
+    profile.renameConstraint(c, "BottomThickness")
+
+    shell = body.newObject("PartDesign::Revolution", "BowlShell")
+    shell.Profile = profile
+    shell.ReferenceAxis = (profile, ["V_Axis"])
+    shell.Angle = 360.0
+    hide(profile)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 2. Slice off one side (pocket through everything)
+    # --------------------------------------------------------
+    slice_sk = attach_sketch(body, "SliceSketch", "XY_Plane")
+    big = flange_outer_r + 50.0
+    p1, p2, p3, p4 = vec(cut_x, -big), vec(big, -big), vec(big, big), vec(cut_x, big)
+    lines = [
+        slice_sk.addGeometry(Part.LineSegment(a, b), False)
+        for a, b in ((p1, p2), (p2, p3), (p3, p4), (p4, p1))
+    ]
+    for i in range(4):
+        slice_sk.addConstraint(Sketcher.Constraint(
+            "Coincident", lines[i], 2, lines[(i + 1) % 4], 1))
+    slice_sk.addConstraint(Sketcher.Constraint("Horizontal", lines[0]))
+    slice_sk.addConstraint(Sketcher.Constraint("Horizontal", lines[2]))
+    slice_sk.addConstraint(Sketcher.Constraint("Vertical", lines[1]))
+    slice_sk.addConstraint(Sketcher.Constraint("Vertical", lines[3]))
+    c = slice_sk.addConstraint(Sketcher.Constraint(
+        "DistanceX", -1, 1, lines[3], 1, cut_x))
+    slice_sk.renameConstraint(c, "SlicePositionX")
+
+    slice_cut = body.newObject("PartDesign::Pocket", "SliceCut")
+    slice_cut.Profile = slice_sk
+    slice_cut.Type = "ThroughAll"
+    hide(slice_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 3. Flange pad (partial ring on the remaining curved rim)
+    # --------------------------------------------------------
+    # The band starts at the INNER wall radius so the pad always
+    # overlaps the shell and fuses into a single solid.
+    flange_sk = attach_sketch(body, "FlangeSketch", "XY_Plane")
+
+    fo = flange_sk.addGeometry(Part.ArcOfCircle(
+        Part.Circle(vec(0, 0), Z_NORMAL, flange_outer_r),
+        theta_start, theta_end), False)
+    fi = flange_sk.addGeometry(Part.ArcOfCircle(
+        Part.Circle(vec(0, 0), Z_NORMAL, inner_r),
+        theta_start, theta_end), False)
+
+    def rim_point(radius, angle):
+        return vec(radius * math.cos(angle), radius * math.sin(angle))
+
+    e1 = flange_sk.addGeometry(Part.LineSegment(
+        rim_point(inner_r, theta_start), rim_point(flange_outer_r, theta_start)),
+        False)
+    e2 = flange_sk.addGeometry(Part.LineSegment(
+        rim_point(inner_r, theta_end), rim_point(flange_outer_r, theta_end)),
+        False)
+
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", fo, 3, -1, 1))
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", fi, 3, -1, 1))
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", e1, 1, fi, 1))
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", e1, 2, fo, 1))
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", e2, 1, fi, 2))
+    flange_sk.addConstraint(Sketcher.Constraint("Coincident", e2, 2, fo, 2))
+    c = flange_sk.addConstraint(Sketcher.Constraint("Radius", fo, flange_outer_r))
+    flange_sk.renameConstraint(c, "FlangeOuterRadius")
+    c = flange_sk.addConstraint(Sketcher.Constraint("Radius", fi, inner_r))
+    flange_sk.renameConstraint(c, "FlangeInnerRadius")
+
+    flange_pad = body.newObject("PartDesign::Pad", "FlangePad")
+    flange_pad.Profile = flange_sk
+    flange_pad.Length = FLANGE_THICKNESS
+    flange_pad.Reversed = True          # pad downward, top stays at Z = 0
+    hide(flange_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 4. Holes along the flange
+    # --------------------------------------------------------
+    holes_sk = attach_sketch(body, "HolesSketch", "XY_Plane")
+
+    arc_angle = theta_end - theta_start
+    hole_count = max(1, int(hole_path_r * arc_angle / HOLE_SPACING))
+
+    first = None
+    for i in range(hole_count):
+        t = theta_start + arc_angle * (i + 0.5) / hole_count
+        g = holes_sk.addGeometry(Part.Circle(
+            rim_point(hole_path_r, t), Z_NORMAL, hole_r), False)
+        if first is None:
+            first = g
+            c = holes_sk.addConstraint(Sketcher.Constraint("Radius", g, hole_r))
+            holes_sk.renameConstraint(c, "HoleRadius")
+        else:
+            holes_sk.addConstraint(Sketcher.Constraint("Equal", first, g))
+
+    flange_holes = body.newObject("PartDesign::Pocket", "FlangeHoles")
+    flange_holes.Profile = holes_sk
+    flange_holes.Type = "ThroughAll"
+    hide(holes_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # 5. Three slits in the flat bottom
+    # --------------------------------------------------------
+    # The slice plane has constant X, so its edge runs along Y and the
+    # slits run along X, the middle one on the X axis. Rounded ends;
+    # each slit stops SLIT_EDGE_CLEARANCE short of the edge of the
+    # flat bottom, so the outer slits are a little shorter.
+    slit_r = SLIT_WIDTH / 2.0
+    reach = flat_r - SLIT_EDGE_CLEARANCE - slit_r  # end-arc centres from origin
+    if reach <= SLIT_SPACING:
+        raise ValueError(
+            "The outer slits do not fit on the flat bottom; reduce "
+            "SLIT_SPACING or SLIT_EDGE_CLEARANCE.")
+    x_mid = reach
+    x_side = math.sqrt(reach ** 2 - SLIT_SPACING ** 2)
+
+    slit_sk = attach_sketch(body, "SlitSketch", "XY_Plane", offset_z=z_out)
+
+    def add_slot(sk, x0, x1, y, r):
+        """Slot along X: two horizontal lines closed by semicircular
+        ends. Returns the (left, right) end-arc ids."""
+        left = sk.addGeometry(Part.ArcOfCircle(
+            Part.Circle(vec(x0, y), Z_NORMAL, r),
+            math.pi / 2.0, 3.0 * math.pi / 2.0), False)
+        right = sk.addGeometry(Part.ArcOfCircle(
+            Part.Circle(vec(x1, y), Z_NORMAL, r),
+            -math.pi / 2.0, math.pi / 2.0), False)
+        top = sk.addGeometry(Part.LineSegment(
+            vec(x0, y + r), vec(x1, y + r)), False)
+        bottom = sk.addGeometry(Part.LineSegment(
+            vec(x0, y - r), vec(x1, y - r)), False)
+        # End-to-end tangencies keep the outline closed and smooth.
+        sk.addConstraint(Sketcher.Constraint("Tangent", top, 1, left, 1))
+        sk.addConstraint(Sketcher.Constraint("Tangent", top, 2, right, 2))
+        sk.addConstraint(Sketcher.Constraint("Tangent", bottom, 1, left, 2))
+        sk.addConstraint(Sketcher.Constraint("Tangent", bottom, 2, right, 1))
+        sk.addConstraint(Sketcher.Constraint("Horizontal", top))
+        sk.addConstraint(Sketcher.Constraint("Equal", left, right))
+        return left, right
+
+    mL, mR = add_slot(slit_sk, -x_mid, x_mid, 0.0, slit_r)
+    bL, bR = add_slot(slit_sk, -x_side, x_side, SLIT_SPACING, slit_r)
+    cL, cR = add_slot(slit_sk, -x_side, x_side, -SLIT_SPACING, slit_r)
+
+    # One width for all three slits (width = 2 x this radius).
+    c = slit_sk.addConstraint(Sketcher.Constraint("Radius", mL, slit_r))
+    slit_sk.renameConstraint(c, "SlitEndRadius")
+    slit_sk.addConstraint(Sketcher.Constraint("Equal", mL, bL))
+    slit_sk.addConstraint(Sketcher.Constraint("Equal", mL, cL))
+
+    # Middle slit: centre line on the X axis.
+    slit_sk.addConstraint(Sketcher.Constraint("PointOnObject", mL, 3, -1))
+    c = slit_sk.addConstraint(Sketcher.Constraint(
+        "DistanceX", -1, 1, mL, 3, -x_mid))
+    slit_sk.renameConstraint(c, "MiddleSlitStartX")
+    c = slit_sk.addConstraint(Sketcher.Constraint(
+        "DistanceX", mL, 3, mR, 3, 2.0 * x_mid))
+    slit_sk.renameConstraint(c, "MiddleSlitLength")
+
+    # Upper side slit.
+    c = slit_sk.addConstraint(Sketcher.Constraint(
+        "DistanceY", -1, 1, bL, 3, SLIT_SPACING))
+    slit_sk.renameConstraint(c, "SlitSpacing")
+    c = slit_sk.addConstraint(Sketcher.Constraint(
+        "DistanceX", -1, 1, bL, 3, -x_side))
+    slit_sk.renameConstraint(c, "SideSlitStartX")
+    c = slit_sk.addConstraint(Sketcher.Constraint(
+        "DistanceX", bL, 3, bR, 3, 2.0 * x_side))
+    slit_sk.renameConstraint(c, "SideSlitLength")
+
+    # Lower side slit mirrors the upper one about the X axis.
+    slit_sk.addConstraint(Sketcher.Constraint("Symmetric", bL, 3, cL, 3, -1))
+    slit_sk.addConstraint(Sketcher.Constraint("Vertical", bR, 3, cR, 3))
+
+    slits = body.newObject("PartDesign::Pocket", "BottomSlits")
+    slits.Profile = slit_sk
+    slits.Type = "ThroughAll"
+    slits.Reversed = True          # cut upward, through the flat base
+    hide(slit_sk)
+    doc.recompute()
+
+    # --------------------------------------------------------
+    # Final checks and view
+    # --------------------------------------------------------
+    for feat in (shell, slice_cut, flange_pad, flange_holes, slits):
+        if feat.Shape.isNull():
+            raise RuntimeError(feat.Name + " produced an empty shape.")
+
+    if not body.Shape.isValid():
+        App.Console.PrintWarning(
+            "The final shape reports as invalid; check the model.\n")
+
+    if App.GuiUp:
+        import FreeCADGui as Gui
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.SendMsgToActiveView("ViewFit")
+
+    App.Console.PrintMessage(
+        "Bowl created with %d flange holes.\n"
+        "Expand Bowl in the tree and double-click any sketch, pad or "
+        "pocket to edit it.\n" % hole_count
+    )
+    return body
+
+
+try:
+    build_model()
+except Exception:
+    show_error(
+        "The bowl macro failed:\n\n" + traceback.format_exc()
+    )

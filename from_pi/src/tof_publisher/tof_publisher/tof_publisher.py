@@ -19,7 +19,7 @@ PUBLISH_HZ = 10
 #   gray = (MAX_DISTANCE_MM - depth) * 255 / MAX_DISTANCE_MM
 # Invalid pixels (no return / low confidence) are forced to 0 (far), not 255 —
 # otherwise a dropout would look like an obstacle on the lens.
-MAX_DISTANCE_MM = 2000  # supported hardware ranges are 2000 or 4000
+MAX_DISTANCE_MM = 4000  # supported hardware ranges are 2000 or 4000
 
 # 0 disables confidence filtering (same default as the working preview example;
 # try 10-30 later if the image is noisy).
