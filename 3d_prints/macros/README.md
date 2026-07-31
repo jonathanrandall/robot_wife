@@ -5,10 +5,10 @@ Parametric FreeCAD macros (`.FCMacro`) that generate the STL files in the parent
 | File | Part |
 |------|------|
 | `batter_box_robot_wife.FCMacro` | Battery box |
-| `boob_led.FCMacro` | LED diffuser enclosure |
-| `hemisphere_wife.FCMacro` | Hemisphere diffuser |
 | `light_diffuser.FCMacro` | Light diffuser sphere |
+| `pan_tilt_base_hiwonder.FCMacro` | Hiwonder pan-tilt base bracket |
 | `rpi_holder.FCMacro` | Raspberry Pi mount |
 | `speaker_box.FCMacro` | Speaker enclosure |
 | `switch_holder.FCMacro` | Power switch holder |
-| `wife_boobs_v2.FCMacro` | LED enclosure v2 |
+| `waveshare_display.FCMacro` | Waveshare 7" display holder |
+| `wife_boobs_claude_v4.FCMacro` | LED diffuser enclosure v4 |
