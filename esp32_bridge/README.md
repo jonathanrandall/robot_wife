@@ -26,7 +26,3 @@ pio device monitor
 
 All user-facing settings are at the top of `src/main.cpp`: WiFi credentials, wheel dimensions, encoder CPR, PID gains, and pin assignments.
 
-## Related
-
-- **GitHub repo** (standalone four-motor controller): https://github.com/jonathanrandall/four_motor_controller
-- **Build video**: https://youtu.be/qtjofj0y1YY
