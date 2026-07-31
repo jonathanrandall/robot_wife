@@ -11,7 +11,7 @@ A personal robotics project: a conversational, physically expressive companion r
 | **Brain** | Raspberry Pi 5 |
 | **Motor / Servo Controller** | Custom ESP32-S3 PCB (PlatformIO/Arduino firmware) |
 | **Drive system** | 4-wheel differential drive, 4× motors with 1425 CPR quadrature encoders |
-| **Motor drivers** | 4× VNH7040 H-bridge ICs controlled via MCP23017 I2C GPIO expander — [GitHub](https://github.com/jonathanrandall/four_motor_controller) / [build video](https://youtu.be/qtjofj0y1YY) |
+| **Motor drivers** | 4× VNH7040 H-bridge ICs controlled via MCP23017 I2C GPIO expander — [GitHub repo](https://github.com/jonathanrandall/four_motor_controller) containing KiCad schematic, PCB layout and bill of materials / [build video](https://youtu.be/qtjofj0y1YY) |
 | **Head** | [Poppy Eva Head](https://github.com/poppy-project/Poppy-eva-head-design) — pan-tilt mount with 2× bus servos (xArm-compatible) |
 | **Head servo controller** | ESP32 running MicroPython — bridges UART commands from the Pi to the servo bus |
 | **Hair LEDs** | 5× WS2811 addressable LEDs via Raspberry Pi SPI (GPIO 10 / MOSI) |
