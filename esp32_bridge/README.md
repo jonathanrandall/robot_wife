@@ -2,7 +2,10 @@
 
 PlatformIO/Arduino firmware for the custom ESP32-S3 PCB that handles all motor control and drive servo functions.
 
-See **[DOCUMENTATION.md](DOCUMENTATION.md)** for the full software reference — pin assignments, PID tuning, serial protocol, web API, and FreeRTOS task structure.
+Datasheets for the key ICs are included in this directory:
+- `vnh7040_datasheet.pdf` — VNH7040 H-bridge motor driver
+- `MCP23017-Data-Sheet-DS20001952.pdf` — MCP23017 I2C GPIO expander
+- `AP63200-AP63201-AP63203-AP63205.pdf` — AP632xx buck converter
 
 ## Quick start
 
