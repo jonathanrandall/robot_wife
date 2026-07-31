@@ -15,6 +15,6 @@ STL files and FreeCAD parametric macros for all printed parts on the robot.
 | `Speaker_Box.stl` | USB speaker enclosure |
 | `Switch_holderv2.stl` | Power switch holder |
 | `Waveshare_Display_holder.stl` | Waveshare 7" display mount |
-| `wife_boobs_v4.stl` | LED diffuser enclosure |
+| `wife_boobs_v4.stl` | 3d printed boobs |
 
 FreeCAD parametric source macros are in `macros/`.
