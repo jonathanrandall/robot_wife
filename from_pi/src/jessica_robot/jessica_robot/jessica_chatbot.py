@@ -204,7 +204,7 @@ PIPER_VOICE = "/home/jonny/piper_voices/en_US-ljspeech-medium.onnx"         # Am
 
 MAX_PHRASE_SECONDS   = 20   # max recording length per turn
 CONVERSATION_TIMEOUT = 30   # seconds of silence before ending conversation
-PAUSE_THRESHOLD      = 1.2  # seconds of silence = end of phrase (increase if Jessica cuts you off)
+PAUSE_THRESHOLD      = 2.0  # seconds of silence = end of phrase (increase if Jessica cuts you off)
 
 
 # ---------------------------------------------------------------------
@@ -728,6 +728,14 @@ _STT_CORRECTIONS = {
     r"\bdarlin\b":  "darling",
     r"\bdarlings\b": "darling",
     r"\bdaling\b":  "darling",   # seen in logs: "Jessica Daling"
+    # Whisper consistently mishears "twirl" as "12"/"twelve" in this phrasing
+    # (confirmed live 2026-07-27: clean, unclipped audio still transcribed
+    # "do a twirl please" as "do a 12 please"). Narrow to "do (a) 12/twelve"
+    # so a genuine number request elsewhere in conversation isn't touched.
+    r"\bdo a 12\b":     "do a twirl",
+    r"\bdo 12\b":       "do a twirl",
+    r"\bdo a twelve\b": "do a twirl",
+    r"\bdo twelve\b":   "do a twirl",
 }
 
 

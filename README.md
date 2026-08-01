@@ -1,9 +1,9 @@
 # Robot Wife — Jessica
 
 <p align="center">
-  <img src="BOM/photos/IMG_0524.JPEG" height="400"/>
+  <img src="BOM/photos/IMG_0524.JPEG" height="600"/>
   &nbsp;&nbsp;
-  <img src="BOM/photos/IMG_0526.JPEG" height="400"/>
+  <img src="BOM/photos/IMG_0526.JPEG" height="600"/>
 </p>
 
 A personal robotics project: a conversational, physically expressive companion robot called **Jessica**. She drives around on four wheels, moves her head with a pan-tilt servo, lights up her LED hair, sees through a stereo USB camera, listens via microphone, and speaks through a USB speaker — all coordinated by a Raspberry Pi 5 running ROS 2 and an ESP32-S3 handling the low-level motor and servo control.

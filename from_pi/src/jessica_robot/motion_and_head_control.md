@@ -154,8 +154,8 @@ the next `write()`. This is how joystick buttons trigger one-shot actions
 ```yaml
 left_wheel_names:  ['left_front_wheel_joint', 'left_rear_wheel_joint']
 right_wheel_names: ['right_front_wheel_joint', 'right_rear_wheel_joint']
-wheel_separation: 0.26   # metres — RE-TUNE (wheels are closer now)
-wheel_radius:     0.072  # metres
+wheel_separation: 0.282   # metres — RE-TUNE (wheels are closer now)
+wheel_radius:     0.06  # metres
 use_stamped_vel: true    # subscribes to TwistStamped on /diff_cont/cmd_vel
 ```
 

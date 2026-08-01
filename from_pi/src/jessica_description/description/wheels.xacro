@@ -1,22 +1,23 @@
 <?xml version="1.0"?>
 <!--
-  gobilda 144mm wheel (see meshes/step, meshes/visual; the older wheel_120
-  files are kept there too in case we switch back). Collision stays a plain
-  cylinder primitive rather than the full tread mesh.
+  gobilda 3601-0014-0120 wheel (see meshes/step, meshes/visual; the
+  wheel_144 files are kept there too in case we switch again). Collision
+  stays a plain cylinder primitive rather than the full tread mesh.
 
-  Unlike wheel_120 (native axis Z, origin at one face), wheel_144's native
-  rotation axis is the STL's local X, spanning -18mm to +34mm - the origin
-  is 8mm off the width's centre. wheel_joint spins about Y, so the visual is
-  yawed +90 deg about Z (native X -> global Y), then shifted -8mm in Y so
-  the mesh ends up centred on the joint like the collision cylinder is.
+  The mesh's native rotation axis is the STL's local Z; wheel_joint spins
+  about Y, so the visual is rotated -90 deg about X to line the two up, then
+  shifted 16mm (half the wheel width) so the mesh - whose native origin sits
+  at one face, not the centre - ends up centred on the joint like the
+  collision cylinder already is. (wheel_144 is different: native axis X,
+  origin 8mm off-centre -> xyz="0 -0.008 0" rpy="0 0 pi/2" if reinstated.)
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:macro name="wheel" params="name x y reflect">
     <link name="${name}">
       <visual>
-        <origin xyz="0 -0.008 0" rpy="0 0 ${pi/2}"/>
-        <geometry><mesh filename="package://jessica_description/description/meshes/visual/wheel_144.stl" scale="0.001 0.001 0.001"/></geometry>
+        <origin xyz="0 0.016 0" rpy="${-pi/2} 0 0"/>
+        <geometry><mesh filename="package://jessica_description/description/meshes/visual/wheel_120.stl" scale="0.001 0.001 0.001"/></geometry>
         <material name="black"/>
       </visual>
       <collision>
